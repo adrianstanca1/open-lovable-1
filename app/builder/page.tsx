@@ -28,6 +28,7 @@ export default function BuilderPage() {
     
     // Start the website generation process
     generateWebsite(url, style || "modern");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   const generateWebsite = async (url: string, style: string) => {

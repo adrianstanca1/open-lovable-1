@@ -1,11 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { appConfig } from '@/config/app.config';
 import HeroInput from '@/components/HeroInput';
 import SidebarInput from '@/components/app/generation/SidebarInput';
-import SidebarQuickInput from '@/components/app/generation/SidebarQuickInput';
 import HeaderBrandKit from '@/components/shared/header/BrandKit/BrandKit';
 import { HeaderProvider } from '@/components/shared/header/HeaderContext';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -23,7 +22,7 @@ import {
   SiCss3, 
   SiJson 
 } from '@/lib/icons';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import CodeApplicationProgress, { type CodeApplicationState } from '@/components/CodeApplicationProgress';
 
 interface SandboxData {
@@ -45,7 +44,7 @@ interface ChatMessage {
   };
 }
 
-export default function AISandboxPage() {
+function AISandboxPage() {
   const [sandboxData, setSandboxData] = useState<SandboxData | null>(null);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState({ text: 'Not connected', active: false });
@@ -81,11 +80,14 @@ export default function AISandboxPage() {
   const [selectedStyle, setSelectedStyle] = useState<string | null>(null);
   const [showLoadingBackground, setShowLoadingBackground] = useState(false);
   const [urlScreenshot, setUrlScreenshot] = useState<string | null>(null);
+  const [isScreenshotLoaded, setIsScreenshotLoaded] = useState(false);
   const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   const [isPreparingDesign, setIsPreparingDesign] = useState(false);
   const [targetUrl, setTargetUrl] = useState<string>('');
+  const [sidebarScrolled, setSidebarScrolled] = useState(false);
   const [loadingStage, setLoadingStage] = useState<'gathering' | 'planning' | 'generating' | null>(null);
+  const [isStartingNewGeneration, setIsStartingNewGeneration] = useState(false);
   const [sandboxFiles, setSandboxFiles] = useState<Record<string, string>>({});
   const [hasInitialSubmission, setHasInitialSubmission] = useState<boolean>(false);
   const [fileStructure, setFileStructure] = useState<string>('');
@@ -123,7 +125,7 @@ export default function AISandboxPage() {
     thinkingText?: string;
     thinkingDuration?: number;
     currentFile?: { path: string; content: string; type: string };
-    files: Array<{ path: string; content: string; type: string; completed: boolean }>;
+    files: Array<{ path: string; content: string; type: string; completed: boolean; edited?: boolean }>;
     lastProcessedPosition: number;
     isEdit?: boolean;
   }>({
@@ -165,11 +167,12 @@ export default function AISandboxPage() {
         // Mark that we have an initial submission since we're loading with a URL
         setHasInitialSubmission(true);
         
-        // Clear sessionStorage after reading
+        // Clear sessionStorage after reading  
         sessionStorage.removeItem('targetUrl');
         sessionStorage.removeItem('selectedStyle');
         sessionStorage.removeItem('selectedModel');
         sessionStorage.removeItem('additionalInstructions');
+        // Note: Don't clear siteMarkdown here, it will be cleared when used
         
         // Set the values in the component state
         setHomeUrlInput(storedUrl);
@@ -178,8 +181,9 @@ export default function AISandboxPage() {
         // Add details to context if provided
         if (detailsParam) {
           setHomeContextInput(detailsParam);
-        } else if (storedStyle) {
-          // If we have a style but no details, set the style as context
+        } else if (storedStyle && !urlParam) {
+          // Only apply stored style if no screenshot URL is provided
+          // This prevents unwanted style inheritance when using screenshot search
           const styleNames: Record<string, string> = {
             '1': 'Glassmorphism',
             '2': 'Neumorphism',
@@ -203,6 +207,10 @@ export default function AISandboxPage() {
           }
           
           setHomeContextInput(contextString);
+        } else if (storedInstructions && !urlParam) {
+          // Apply only instructions if no style but instructions are provided
+          // and no screenshot URL is provided
+          setHomeContextInput(storedInstructions);
         }
         
         if (storedModel) {
@@ -277,6 +285,7 @@ export default function AISandboxPage() {
     return () => {
       isMounted = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Run only on mount
   
   useEffect(() => {
@@ -347,6 +356,7 @@ export default function AISandboxPage() {
       
       return () => clearTimeout(timer);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldAutoGenerate, homeUrlInput, showHomeScreen]);
 
   const updateStatus = (text: string, active: boolean) => {
@@ -371,16 +381,18 @@ export default function AISandboxPage() {
   };
   
   const checkAndInstallPackages = async () => {
+    // This function is only called when user explicitly requests it
+    // Don't show error if no sandbox - it's likely being created
     if (!sandboxData) {
-      addChatMessage('No active sandbox. Create a sandbox first!', 'system');
+      console.log('[checkAndInstallPackages] No sandbox data available yet');
       return;
     }
     
     // Vite error checking removed - handled by template setup
-    addChatMessage('Sandbox is ready. Vite configuration is handled by the template.', 'system');
+    addChatMessage('Checking packages... Sandbox is ready with Vite configuration.', 'system');
   };
   
-  const handleSurfaceError = (errors: any[]) => {
+  const handleSurfaceError = (_errors: any[]) => {
     // Function kept for compatibility but Vite errors are now handled by template
     
     // Focus the input
@@ -502,7 +514,7 @@ export default function AISandboxPage() {
     // Prevent duplicate sandbox creation
     if (sandboxCreationRef.current) {
       console.log('[createSandbox] Sandbox creation already in progress, skipping...');
-      return;
+      return null;
     }
     
     sandboxCreationRef.current = true;
@@ -550,25 +562,10 @@ export default function AISandboxPage() {
         // Fetch sandbox files after creation
         setTimeout(fetchSandboxFiles, 1000);
         
-        // Restart Vite server to ensure it's running
-        setTimeout(async () => {
-          try {
-            console.log('[createSandbox] Ensuring Vite server is running...');
-            const restartResponse = await fetch('/api/restart-vite', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' }
-            });
-            
-            if (restartResponse.ok) {
-              const restartData = await restartResponse.json();
-              if (restartData.success) {
-                console.log('[createSandbox] Vite server started successfully');
-              }
-            }
-          } catch (error) {
-            console.error('[createSandbox] Error starting Vite server:', error);
-          }
-        }, 2000);
+        // For Vercel sandboxes, Vite is already started during setupViteApp
+        // No need to restart it immediately after creation
+        // Only restart if there's an actual issue later
+        console.log('[createSandbox] Sandbox ready with Vite server running');
         
         // Only add welcome message if not coming from home screen
         if (!fromHomeScreen) {
@@ -582,6 +579,9 @@ Tip: I automatically detect and install npm packages from your code imports (lik
             iframeRef.current.src = data.url;
           }
         }, 100);
+        
+        // Return the sandbox data so it can be used immediately
+        return data;
       } else {
         throw new Error(data.error || 'Unknown error');
       }
@@ -590,6 +590,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
       updateStatus('Error', false);
       log(`Failed to create sandbox: ${error.message}`, 'error');
       addChatMessage(`Failed to create sandbox: ${error.message}`, 'system');
+      throw error;
     } finally {
       setLoading(false);
       sandboxCreationRef.current = false; // Reset the ref
@@ -604,7 +605,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     }
   };
 
-  const applyGeneratedCode = async (code: string, isEdit: boolean = false) => {
+  const applyGeneratedCode = async (code: string, isEdit: boolean = false, overrideSandboxData?: SandboxData) => {
     setLoading(true);
     log('Applying AI-generated code...');
     
@@ -621,6 +622,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
       }
       
       // Use streaming endpoint for real-time feedback
+      const effectiveSandboxData = overrideSandboxData || sandboxData;
       const response = await fetch('/api/apply-ai-code-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -628,7 +630,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
           response: code,
           isEdit: isEdit,
           packages: pendingPackages,
-          sandboxId: sandboxData?.sandboxId // Pass the sandbox ID to ensure proper connection
+          sandboxId: effectiveSandboxData?.sandboxId // Pass the sandbox ID to ensure proper connection
         })
       });
       
@@ -669,7 +671,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                   } else if (data.message.includes('Creating files') || data.message.includes('Applying')) {
                     setCodeApplicationState({ 
                       stage: 'applying',
-                      filesGenerated: results.filesCreated 
+                      filesGenerated: [] // Files will be populated when complete
                     });
                   }
                   break;
@@ -733,10 +735,14 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                   setTimeout(() => {
                     setCodeApplicationState({ stage: null });
                   }, 3000);
+                  // Reset loading state when complete
+                  setLoading(false);
                   break;
                   
                 case 'error':
                   addChatMessage(`Error: ${data.message || data.error || 'Unknown error'}`, 'system');
+                  // Reset loading state on error
+                  setLoading(false);
                   break;
                   
                 case 'warning':
@@ -750,7 +756,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                   }
                   break;
               }
-            } catch (e) {
+            } catch {
               // Ignore parse errors
             }
           }
@@ -759,12 +765,17 @@ Tip: I automatically detect and install npm packages from your code imports (lik
       
       // Process final data
       if (finalData && finalData.type === 'complete') {
-        const data = {
+        const data: any = {
           success: true,
           results: finalData.results,
           explanation: finalData.explanation,
           structure: finalData.structure,
-          message: finalData.message
+          message: finalData.message,
+          autoCompleted: finalData.autoCompleted,
+          autoCompletedComponents: finalData.autoCompletedComponents,
+          warning: finalData.warning,
+          missingImports: finalData.missingImports,
+          debug: finalData.debug
         };
         
         if (data.success) {
@@ -860,6 +871,9 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         console.log('[applyGeneratedCode] Current iframe element:', iframeRef.current);
         console.log('[applyGeneratedCode] Current iframe src:', iframeRef.current?.src);
         
+        // Set applying code state for edits to show loading overlay
+        // Removed overlay - changes apply directly
+        
         if (results.filesCreated?.length > 0) {
           setConversationContext(prev => ({
             ...prev,
@@ -899,8 +913,8 @@ Tip: I automatically detect and install npm packages from your code imports (lik
           // Fetch updated file structure
           await fetchSandboxFiles();
           
-          // Automatically check and install any missing packages
-          await checkAndInstallPackages();
+          // Skip automatic package check - it's not needed here and can cause false "no sandbox" messages
+          // Packages are already installed during the apply-ai-code-stream process
           
           // Test build to ensure everything compiles correctly
           // Skip build test for now - it's causing errors with undefined activeSandbox
@@ -912,11 +926,12 @@ Tip: I automatically detect and install npm packages from your code imports (lik
           const refreshDelay = appConfig.codeApplication.defaultRefreshDelay; // Allow Vite to process changes
           
           setTimeout(() => {
-            if (iframeRef.current && sandboxData?.url) {
+            const currentSandboxData = effectiveSandboxData;
+            if (iframeRef.current && currentSandboxData?.url) {
               console.log('[home] Refreshing iframe after code application...');
               
               // Method 1: Change src with timestamp
-              const urlWithTimestamp = `${sandboxData.url}?t=${Date.now()}&applied=true`;
+              const urlWithTimestamp = `${currentSandboxData.url}?t=${Date.now()}&applied=true`;
               iframeRef.current.src = urlWithTimestamp;
               
               // Method 2: Force reload after a short delay
@@ -929,6 +944,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                 } catch (e) {
                   console.log('[home] Could not reload iframe (cross-origin):', e);
                 }
+                // Reload completed
               }, 1000);
             }
           }, refreshDelay);
@@ -937,7 +953,8 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         }
         
           // Give Vite HMR a moment to detect changes, then ensure refresh
-          if (iframeRef.current && sandboxData?.url) {
+          const currentSandboxData = effectiveSandboxData;
+          if (iframeRef.current && currentSandboxData?.url) {
             // Wait for Vite to process the file changes
             // If packages were installed, wait longer for Vite to restart
             const packagesInstalled = results?.packagesInstalled?.length > 0 || data.results?.packagesInstalled?.length > 0;
@@ -945,14 +962,14 @@ Tip: I automatically detect and install npm packages from your code imports (lik
             console.log(`[applyGeneratedCode] Packages installed: ${packagesInstalled}, refresh delay: ${refreshDelay}ms`);
             
             setTimeout(async () => {
-            if (iframeRef.current && sandboxData?.url) {
+            if (iframeRef.current && currentSandboxData?.url) {
               console.log('[applyGeneratedCode] Starting iframe refresh sequence...');
               console.log('[applyGeneratedCode] Current iframe src:', iframeRef.current.src);
-              console.log('[applyGeneratedCode] Sandbox URL:', sandboxData.url);
+              console.log('[applyGeneratedCode] Sandbox URL:', currentSandboxData.url);
               
               // Method 1: Try direct navigation first
               try {
-                const urlWithTimestamp = `${sandboxData.url}?t=${Date.now()}&force=true`;
+                const urlWithTimestamp = `${currentSandboxData.url}?t=${Date.now()}&force=true`;
                 console.log('[applyGeneratedCode] Attempting direct navigation to:', urlWithTimestamp);
                 
                 // Remove any existing onload handler
@@ -971,7 +988,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                     console.log('[applyGeneratedCode] Iframe loaded successfully');
                     return;
                   }
-                } catch (e) {
+                } catch {
                   console.log('[applyGeneratedCode] Cannot access iframe content (CORS), assuming loaded');
                   return;
                 }
@@ -998,7 +1015,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
               iframeRef.current.remove();
               
               // Add new iframe
-              newIframe.src = `${sandboxData.url}?t=${Date.now()}&recreated=true`;
+              newIframe.src = `${currentSandboxData.url}?t=${Date.now()}&recreated=true`;
               parent?.appendChild(newIframe);
               
               // Update ref
@@ -1054,56 +1071,56 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     }
   };
   
-  const restartViteServer = async () => {
-    try {
-      addChatMessage('Restarting Vite dev server...', 'system');
-      
-      const response = await fetch('/api/restart-vite', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        if (data.success) {
-          addChatMessage('✓ Vite dev server restarted successfully!', 'system');
-          
-          // Refresh the iframe after a short delay
-          setTimeout(() => {
-            if (iframeRef.current && sandboxData?.url) {
-              iframeRef.current.src = `${sandboxData.url}?t=${Date.now()}`;
-            }
-          }, 2000);
-        } else {
-          addChatMessage(`Failed to restart Vite: ${data.error}`, 'error');
-        }
-      } else {
-        addChatMessage('Failed to restart Vite server', 'error');
-      }
-    } catch (error) {
-      console.error('[restartViteServer] Error:', error);
-      addChatMessage(`Error restarting Vite: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
-    }
-  };
+//   const restartViteServer = async () => {
+//     try {
+//       addChatMessage('Restarting Vite dev server...', 'system');
+//       
+//       const response = await fetch('/api/restart-vite', {
+//         method: 'POST',
+//         headers: { 'Content-Type': 'application/json' }
+//       });
+//       
+//       if (response.ok) {
+//         const data = await response.json();
+//         if (data.success) {
+//           addChatMessage('✓ Vite dev server restarted successfully!', 'system');
+//           
+//           // Refresh the iframe after a short delay
+//           setTimeout(() => {
+//             if (iframeRef.current && sandboxData?.url) {
+//               iframeRef.current.src = `${sandboxData.url}?t=${Date.now()}`;
+//             }
+//           }, 2000);
+//         } else {
+//           addChatMessage(`Failed to restart Vite: ${data.error}`, 'error');
+//         }
+//       } else {
+//         addChatMessage('Failed to restart Vite server', 'error');
+//       }
+//     } catch (error) {
+//       console.error('[restartViteServer] Error:', error);
+//       addChatMessage(`Error restarting Vite: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
+//     }
+//   };
 
-  const applyCode = async () => {
-    const code = promptInput.trim();
-    if (!code) {
-      log('Please enter some code first', 'error');
-      addChatMessage('No code to apply. Please generate code first.', 'system');
-      return;
-    }
-    
-    // Prevent double clicks
-    if (loading) {
-      console.log('[applyCode] Already loading, skipping...');
-      return;
-    }
-    
-    // Determine if this is an edit based on whether we have applied code before
-    const isEdit = conversationContext.appliedCode.length > 0;
-    await applyGeneratedCode(code, isEdit);
-  };
+//   const applyCode = async () => {
+//     const code = promptInput.trim();
+//     if (!code) {
+//       log('Please enter some code first', 'error');
+//       addChatMessage('No code to apply. Please generate code first.', 'system');
+//       return;
+//     }
+//     
+//     // Prevent double clicks
+//     if (loading) {
+//       console.log('[applyCode] Already loading, skipping...');
+//       return;
+//     }
+//     
+//     // Determine if this is an edit based on whether we have applied code before
+//     const isEdit = conversationContext.appliedCode.length > 0;
+//     await applyGeneratedCode(code, isEdit);
+//   };
 
   const renderMainContent = () => {
     if (activeTab === 'generation' && (generationProgress.isGenerating || generationProgress.files.length > 0)) {
@@ -1113,7 +1130,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
           {/* File Explorer - Hide during edits */}
           {!generationProgress.isEdit && (
             <div className="w-[250px] border-r border-gray-200 bg-white flex flex-col flex-shrink-0">
-            <div className="p-3 bg-gray-100 text-gray-900 flex items-center justify-between">
+            <div className="p-4 bg-gray-100 text-gray-900 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <BsFolderFill style={{ width: '16px', height: '16px' }} />
                 <span className="text-sm font-medium">Explorer</span>
@@ -1121,11 +1138,11 @@ Tip: I automatically detect and install npm packages from your code imports (lik
             </div>
             
             {/* File Tree */}
-            <div className="flex-1 overflow-y-auto p-2 scrollbar-hide">
+            <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
               <div className="text-sm">
                 {/* Root app folder */}
                 <div 
-                  className="flex items-center gap-2 py-1 px-2 hover:bg-gray-100 rounded cursor-pointer text-gray-700"
+                  className="flex items-center gap-2 py-0.5 px-3 hover:bg-gray-100 rounded cursor-pointer text-gray-700"
                   onClick={() => toggleFolder('app')}
                 >
                   {expandedFolders.has('app') ? (
@@ -1142,17 +1159,17 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                 </div>
                 
                 {expandedFolders.has('app') && (
-                  <div className="ml-4">
+                  <div className="ml-6">
                     {/* Group files by directory */}
                     {(() => {
                       const fileTree: { [key: string]: Array<{ name: string; edited?: boolean }> } = {};
                       
                       // Create a map of edited files
-                      const editedFiles = new Set(
-                        generationProgress.files
-                          .filter(f => f.edited)
-                          .map(f => f.path)
-                      );
+                      // const editedFiles = new Set(
+                      //   generationProgress.files
+                      //     .filter(f => f.edited)
+                      //     .map(f => f.path)
+                      // );
                       
                       // Process all files from generation progress
                       generationProgress.files.forEach(file => {
@@ -1171,7 +1188,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                         <div key={dir} className="mb-1">
                           {dir && (
                             <div 
-                              className="flex items-center gap-2 py-1 px-2 hover:bg-gray-100 rounded cursor-pointer text-gray-700"
+                              className="flex items-center gap-2 py-0.5 px-3 hover:bg-gray-100 rounded cursor-pointer text-gray-700"
                               onClick={() => toggleFolder(dir)}
                             >
                               {expandedFolders.has(dir) ? (
@@ -1188,7 +1205,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                             </div>
                           )}
                           {(!dir || expandedFolders.has(dir)) && (
-                            <div className={dir ? 'ml-6' : ''}>
+                            <div className={dir ? 'ml-8' : ''}>
                               {files.sort((a, b) => a.name.localeCompare(b.name)).map(fileInfo => {
                                 const fullPath = dir ? `${dir}/${fileInfo.name}` : fileInfo.name;
                                 const isSelected = selectedFile === fullPath;
@@ -1196,7 +1213,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                                 return (
                                   <div 
                                     key={fullPath} 
-                                    className={`flex items-center gap-2 py-1 px-2 rounded cursor-pointer transition-all ${
+                                    className={`flex items-center gap-2 py-0.5 px-3 rounded cursor-pointer transition-all ${
                                       isSelected 
                                         ? 'bg-blue-500 text-white' 
                                         : 'text-gray-700 hover:bg-gray-100'
@@ -1491,21 +1508,63 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         </div>
       );
     } else if (activeTab === 'preview') {
-      // Show screenshot when we have one and (loading OR generating OR no sandbox yet)
-      if (urlScreenshot && (loading || generationProgress.isGenerating || !sandboxData?.url || isPreparingDesign)) {
+      // Show loading state for initial generation or when starting a new generation with existing sandbox
+      const isInitialGeneration = !sandboxData?.url && (urlScreenshot || isCapturingScreenshot || isPreparingDesign || loadingStage);
+      const isNewGenerationWithSandbox = isStartingNewGeneration && sandboxData?.url;
+      const shouldShowLoadingOverlay = (isInitialGeneration || isNewGenerationWithSandbox) && 
+        (loading || generationProgress.isGenerating || isPreparingDesign || loadingStage || isCapturingScreenshot || isStartingNewGeneration);
+      
+      if (isInitialGeneration || isNewGenerationWithSandbox) {
         return (
-          <div className="relative w-full h-full bg-gray-100">
-            <img 
-              src={urlScreenshot} 
-              alt="Website preview" 
-              className="w-full h-full object-contain"
-            />
-            {(generationProgress.isGenerating || isPreparingDesign) && (
-              <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-                <div className="text-center bg-black/70 rounded-lg p-6 backdrop-blur-sm">
-                  <div className="w-12 h-12 border-3 border-gray-300 border-t-white rounded-full animate-spin mx-auto mb-3" />
-                  <p className="text-white text-sm font-medium">
-                    {generationProgress.isGenerating ? 'Generating code...' : `Preparing your design for ${targetUrl}...`}
+          <div className="relative w-full h-full bg-gray-900">
+            {/* Screenshot as background when available */}
+            {urlScreenshot && (
+              /* eslint-disable-next-line @next/next/no-img-element */
+              <img 
+                src={urlScreenshot} 
+                alt="Website preview" 
+                className="absolute inset-0 w-full h-full object-cover transition-opacity duration-700"
+                style={{ 
+                  opacity: isScreenshotLoaded ? 1 : 0,
+                  willChange: 'opacity'
+                }}
+                onLoad={() => setIsScreenshotLoaded(true)}
+                loading="eager"
+              />
+            )}
+            
+            {/* Loading overlay - only show when actively processing initial generation */}
+            {shouldShowLoadingOverlay && (
+              <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center backdrop-blur-sm">
+                {/* Loading animation with skeleton */}
+                <div className="text-center max-w-md">
+                  {/* Animated skeleton lines */}
+                  <div className="mb-6 space-y-3">
+                    <div className="h-2 bg-gradient-to-r from-transparent via-white/20 to-transparent rounded animate-pulse" 
+                         style={{ animationDuration: '1.5s', animationDelay: '0s' }} />
+                    <div className="h-2 bg-gradient-to-r from-transparent via-white/20 to-transparent rounded animate-pulse w-4/5 mx-auto" 
+                         style={{ animationDuration: '1.5s', animationDelay: '0.2s' }} />
+                    <div className="h-2 bg-gradient-to-r from-transparent via-white/20 to-transparent rounded animate-pulse w-3/5 mx-auto" 
+                         style={{ animationDuration: '1.5s', animationDelay: '0.4s' }} />
+                  </div>
+                  
+                  {/* Spinner */}
+                  <div className="w-12 h-12 border-3 border-white/30 border-t-white rounded-full animate-spin mx-auto mb-4" />
+                  
+                  {/* Status text */}
+                  <p className="text-white text-lg font-medium">
+                    {isCapturingScreenshot ? 'Analyzing website...' :
+                     isPreparingDesign ? 'Preparing design...' :
+                     generationProgress.isGenerating ? 'Generating code...' :
+                     'Loading...'}
+                  </p>
+                  
+                  {/* Subtle progress hint */}
+                  <p className="text-white/60 text-sm mt-2">
+                    {isCapturingScreenshot ? 'Taking a screenshot of the site' :
+                     isPreparingDesign ? 'Understanding the layout and structure' :
+                     generationProgress.isGenerating ? 'Writing React components' :
+                     'Please wait...'}
                   </p>
                 </div>
               </div>
@@ -1514,32 +1573,8 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         );
       }
       
-      // Check loading stage FIRST to prevent showing old sandbox
-      // Don't show loading overlay for edits
-      if (loadingStage || (generationProgress.isGenerating && !generationProgress.isEdit)) {
-        return (
-          <div className="relative w-full h-full bg-gray-50 flex items-center justify-center">
-            <div className="text-center">
-              <div className="mb-8">
-                <div className="w-16 h-16 border-4 border-orange-200 border-t-orange-500 rounded-full animate-spin mx-auto"></div>
-              </div>
-              <h3 className="text-xl font-semibold text-gray-800 mb-2">
-                {loadingStage === 'gathering' && 'Gathering website information...'}
-                {loadingStage === 'planning' && 'Planning your design...'}
-                {(loadingStage === 'generating' || generationProgress.isGenerating) && 'Generating your application...'}
-              </h3>
-              <p className="text-gray-600 text-sm">
-                {loadingStage === 'gathering' && 'Analyzing the website structure and content'}
-                {loadingStage === 'planning' && 'Creating the optimal React component architecture'}
-                {(loadingStage === 'generating' || generationProgress.isGenerating) && 'Writing clean, modern code for your app'}
-              </p>
-            </div>
-          </div>
-        );
-      }
-      
-      // Show sandbox iframe only when not in any loading state
-      if (sandboxData?.url && !loading) {
+      // Show sandbox iframe - keep showing during edits, only hide during initial loading
+      if (sandboxData?.url) {
         return (
           <div className="relative w-full h-full">
             <iframe
@@ -1550,6 +1585,76 @@ Tip: I automatically detect and install npm packages from your code imports (lik
               allow="clipboard-write"
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
             />
+            
+            {/* Package installation overlay - shows when installing packages or applying code */}
+            {codeApplicationState.stage && codeApplicationState.stage !== 'complete' && (
+              <div className="absolute inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-10">
+                <div className="text-center max-w-md">
+                  <div className="mb-6">
+                    {/* Animated icon based on stage */}
+                    {codeApplicationState.stage === 'installing' ? (
+                      <div className="w-16 h-16 mx-auto">
+                        <svg className="w-full h-full animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                      </div>
+                    ) : null}
+                  </div>
+                  
+                  <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                    {codeApplicationState.stage === 'analyzing' && 'Analyzing code...'}
+                    {codeApplicationState.stage === 'installing' && 'Installing packages...'}
+                    {codeApplicationState.stage === 'applying' && 'Applying changes...'}
+                  </h3>
+                  
+                  {/* Package list during installation */}
+                  {codeApplicationState.stage === 'installing' && codeApplicationState.packages && (
+                    <div className="mb-4">
+                      <div className="flex flex-wrap gap-2 justify-center">
+                        {codeApplicationState.packages.map((pkg, index) => (
+                          <span 
+                            key={index}
+                            className={`px-2 py-1 text-xs rounded-full transition-all ${
+                              codeApplicationState.installedPackages?.includes(pkg)
+                                ? 'bg-green-100 text-green-700'
+                                : 'bg-gray-100 text-gray-600'
+                            }`}
+                          >
+                            {pkg}
+                            {codeApplicationState.installedPackages?.includes(pkg) && (
+                              <span className="ml-1">✓</span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Files being generated */}
+                  {codeApplicationState.stage === 'applying' && codeApplicationState.filesGenerated && (
+                    <div className="text-sm text-gray-600">
+                      Creating {codeApplicationState.filesGenerated.length} files...
+                    </div>
+                  )}
+                  
+                  <p className="text-sm text-gray-500 mt-2">
+                    {codeApplicationState.stage === 'analyzing' && 'Parsing generated code and detecting dependencies...'}
+                    {codeApplicationState.stage === 'installing' && 'This may take a moment while npm installs the required packages...'}
+                    {codeApplicationState.stage === 'applying' && 'Writing files to your sandbox environment...'}
+                  </p>
+                </div>
+              </div>
+            )}
+            
+            {/* Show a subtle indicator when code is being edited/generated */}
+            {generationProgress.isGenerating && generationProgress.isEdit && !codeApplicationState.stage && (
+              <div className="absolute top-4 right-4 inline-flex items-center gap-2 px-3 py-1.5 bg-black/80 backdrop-blur-sm rounded-lg">
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                <span className="text-white text-xs font-medium">Generating code...</span>
+              </div>
+            )}
+            
             {/* Refresh button */}
             <button
               onClick={() => {
@@ -1566,18 +1671,6 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
             </button>
-          </div>
-        );
-      }
-      
-      // Show loading animation when capturing screenshot
-      if (isCapturingScreenshot) {
-        return (
-          <div className="flex items-center justify-center h-full bg-gray-900">
-            <div className="text-center">
-              <div className="w-12 h-12 border-3 border-gray-600 border-t-white rounded-full animate-spin mx-auto mb-4" />
-              <h3 className="text-lg font-medium text-white">Gathering website information</h3>
-            </div>
           </div>
         );
       }
@@ -1622,7 +1715,8 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     const lowerMessage = message.toLowerCase().trim();
     if (lowerMessage === 'check packages' || lowerMessage === 'install packages' || lowerMessage === 'npm install') {
       if (!sandboxData) {
-        addChatMessage('No active sandbox. Create a sandbox first!', 'system');
+        // More helpful message - user might be trying to run this too early
+        addChatMessage('The sandbox is still being set up. Please wait for the generation to complete, then try again.', 'system');
         return;
       }
       await checkAndInstallPackages();
@@ -1967,10 +2061,16 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         // setLeftPanelVisible(true);
         
         // Wait for sandbox creation if it's still in progress
+        let activeSandboxData = sandboxData;
         if (sandboxPromise) {
           addChatMessage('Waiting for sandbox to be ready...', 'system');
           try {
-            await sandboxPromise;
+            const newSandboxData = await sandboxPromise;
+            if (newSandboxData != null) {
+              activeSandboxData = newSandboxData;
+              // Also update the state for future use
+              setSandboxData(newSandboxData);
+            }
             // Remove the waiting message
             setChatMessages(prev => prev.filter(msg => msg.content !== 'Waiting for sandbox to be ready...'));
           } catch {
@@ -1979,9 +2079,16 @@ Tip: I automatically detect and install npm packages from your code imports (lik
           }
         }
         
-        if (sandboxData && generatedCode) {
+        if (activeSandboxData && generatedCode) {
+          // For new sandbox creations (especially Vercel), add a delay to ensure Vite is ready
+          if (sandboxCreating) {
+            console.log('[startGeneration] New sandbox created, waiting for services to be ready...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+          
           // Use isEdit flag that was determined at the start
-          await applyGeneratedCode(generatedCode, isEdit);
+          // Pass the sandbox data from the promise if it's different from the state
+          await applyGeneratedCode(generatedCode, isEdit, activeSandboxData !== sandboxData ? activeSandboxData : undefined);
         }
       }
       
@@ -2027,7 +2134,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
 
   const downloadZip = async () => {
     if (!sandboxData) {
-      addChatMessage('No active sandbox to download. Create a sandbox first!', 'system');
+      addChatMessage('Please wait for the sandbox to be created before downloading.', 'system');
       return;
     }
     
@@ -2127,338 +2234,346 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     }
   };
 
-  const clearChatHistory = () => {
-    setChatMessages([{
-      content: 'Chat history cleared. How can I help you?',
-      type: 'system',
-      timestamp: new Date()
-    }]);
-  };
+//   const clearChatHistory = () => {
+//     setChatMessages([{
+//       content: 'Chat history cleared. How can I help you?',
+//       type: 'system',
+//       timestamp: new Date()
+//     }]);
+//   };
+// 
 
-
-  const cloneWebsite = async () => {
-    let url = urlInput.trim();
-    if (!url) {
-      setUrlStatus(prev => [...prev, 'Please enter a URL']);
-      return;
-    }
-    
-    if (!url.match(/^https?:\/\//i)) {
-      url = 'https://' + url;
-    }
-    
-    setUrlStatus([`Using: ${url}`, 'Starting to scrape...']);
-    
-    setUrlOverlayVisible(false);
-    
-    // Remove protocol for cleaner display
-    const cleanUrl = url.replace(/^https?:\/\//i, '');
-    addChatMessage(`Starting to clone ${cleanUrl}...`, 'system');
-    
-    // Capture screenshot immediately and switch to preview tab
-    captureUrlScreenshot(url);
-    
-    try {
-      addChatMessage('Scraping website content...', 'system');
-      const scrapeResponse = await fetch('/api/scrape-url-enhanced', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
-      });
-      
-      if (!scrapeResponse.ok) {
-        throw new Error(`Scraping failed: ${scrapeResponse.status}`);
-      }
-      
-      const scrapeData = await scrapeResponse.json();
-      
-      if (!scrapeData.success) {
-        throw new Error(scrapeData.error || 'Failed to scrape website');
-      }
-      
-      addChatMessage(`Scraped ${scrapeData.content.length} characters from ${url}`, 'system');
-      
-      // Clear preparing design state and switch to generation tab
-      setIsPreparingDesign(false);
-      setActiveTab('generation');
-      
-      setConversationContext(prev => ({
-        ...prev,
-        scrapedWebsites: [...prev.scrapedWebsites, {
-          url,
-          content: scrapeData,
-          timestamp: new Date()
-        }],
-        currentProject: `Clone of ${url}`
-      }));
-      
-      // Start sandbox creation in parallel with code generation
-      let sandboxPromise: Promise<void> | null = null;
-      if (!sandboxData) {
-        addChatMessage('Creating sandbox while generating your React app...', 'system');
-        sandboxPromise = createSandbox(true);
-      }
-      
-      addChatMessage('Analyzing and generating React recreation...', 'system');
-      
-      const recreatePrompt = `I scraped this website and want you to recreate it as a modern React application.
-
-URL: ${url}
-
-SCRAPED CONTENT:
-${scrapeData.content}
-
-${homeContextInput ? `ADDITIONAL CONTEXT/REQUIREMENTS FROM USER:
-${homeContextInput}
-
-Please incorporate these requirements into the design and implementation.` : ''}
-
-REQUIREMENTS:
-1. Create a COMPLETE React application with App.jsx as the main component
-2. App.jsx MUST import and render all other components
-3. Recreate the main sections and layout from the scraped content
-4. ${homeContextInput ? `Apply the user's context/theme: "${homeContextInput}"` : `Use a modern dark theme with excellent contrast:
-   - Background: #0a0a0a
-   - Text: #ffffff
-   - Links: #60a5fa
-   - Accent: #3b82f6`}
-5. Make it fully responsive
-6. Include hover effects and smooth transitions
-7. Create separate components for major sections (Header, Hero, Features, etc.)
-8. Use semantic HTML5 elements
-
-IMPORTANT CONSTRAINTS:
-- DO NOT use React Router or any routing libraries
-- Use regular <a> tags with href="#section" for navigation, NOT Link or NavLink components
-- This is a single-page application, no routing needed
-- ALWAYS create src/App.jsx that imports ALL components
-- Each component should be in src/components/
-- Use Tailwind CSS for ALL styling (no custom CSS files)
-- Make sure the app actually renders visible content
-- Create ALL components that you reference in imports
-
-IMAGE HANDLING RULES:
-- When the scraped content includes images, USE THE ORIGINAL IMAGE URLS whenever appropriate
-- Keep existing images from the scraped site (logos, product images, hero images, icons, etc.)
-- Use the actual image URLs provided in the scraped content, not placeholders
-- Only use placeholder images or generic services when no real images are available
-- For company logos and brand images, ALWAYS use the original URLs to maintain brand identity
-- If scraped data contains image URLs, include them in your img tags
-- Example: If you see "https://example.com/logo.png" in the scraped content, use that exact URL
-
-Focus on the key sections and content, making it clean and modern while preserving visual assets.`;
-      
-      setGenerationProgress(prev => ({
-        isGenerating: true,
-        status: 'Initializing AI...',
-        components: [],
-        currentComponent: 0,
-        streamedCode: '',
-        isStreaming: true,
-        isThinking: false,
-        thinkingText: undefined,
-        thinkingDuration: undefined,
-        // Keep previous files until new ones are generated
-        files: prev.files || [],
-        currentFile: undefined,
-        lastProcessedPosition: 0
-      }));
-      
-      // Switch to generation tab when starting
-      setActiveTab('generation');
-      
-      const aiResponse = await fetch('/api/generate-ai-code-stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: recreatePrompt,
-          model: aiModel,
-          context: {
-            sandboxId: sandboxData?.id,
-            structure: structureContent,
-            conversationContext: conversationContext
-          }
-        })
-      });
-      
-      if (!aiResponse.ok) {
-        throw new Error(`AI generation failed: ${aiResponse.status}`);
-      }
-      
-      const reader = aiResponse.body?.getReader();
-      const decoder = new TextDecoder();
-      let generatedCode = '';
-      let explanation = '';
-      
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
-          
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                
-                if (data.type === 'status') {
-                  setGenerationProgress(prev => ({ ...prev, status: data.message }));
-                } else if (data.type === 'thinking') {
-                  setGenerationProgress(prev => ({ 
-                    ...prev, 
-                    isThinking: true,
-                    thinkingText: (prev.thinkingText || '') + data.text
-                  }));
-                } else if (data.type === 'thinking_complete') {
-                  setGenerationProgress(prev => ({ 
-                    ...prev, 
-                    isThinking: false,
-                    thinkingDuration: data.duration
-                  }));
-                } else if (data.type === 'conversation') {
-                  // Add conversational text to chat only if it's not code
-                  let text = data.text || '';
-                  
-                  // Remove package tags from the text
-                  text = text.replace(/<package>[^<]*<\/package>/g, '');
-                  text = text.replace(/<packages>[^<]*<\/packages>/g, '');
-                  
-                  // Filter out any XML tags and file content that slipped through
-                  if (!text.includes('<file') && !text.includes('import React') && 
-                      !text.includes('export default') && !text.includes('className=') &&
-                      text.trim().length > 0) {
-                    addChatMessage(text.trim(), 'ai');
-                  }
-                } else if (data.type === 'stream' && data.raw) {
-                  setGenerationProgress(prev => ({ 
-                    ...prev, 
-                    streamedCode: prev.streamedCode + data.text,
-                    lastProcessedPosition: prev.lastProcessedPosition || 0
-                  }));
-                } else if (data.type === 'component') {
-                  setGenerationProgress(prev => ({
-                    ...prev,
-                    status: `Generated ${data.name}`,
-                    components: [...prev.components, { 
-                      name: data.name,
-                      path: data.path,
-                      completed: true
-                    }],
-                    currentComponent: prev.currentComponent + 1
-                  }));
-                } else if (data.type === 'complete') {
-                  generatedCode = data.generatedCode;
-                  explanation = data.explanation;
-                  
-                  // Save the last generated code
-                  setConversationContext(prev => ({
-                    ...prev,
-                    lastGeneratedCode: generatedCode
-                  }));
-                }
-              } catch (e) {
-                console.error('Error parsing streaming data:', e);
-              }
-            }
-          }
-        }
-      }
-      
-      setGenerationProgress(prev => ({
-        ...prev,
-        isGenerating: false,
-        isStreaming: false,
-        status: 'Generation complete!',
-        isEdit: prev.isEdit
-      }));
-      
-      if (generatedCode) {
-        addChatMessage('AI recreation generated!', 'system');
-        
-        // Add the explanation to chat if available
-        if (explanation && explanation.trim()) {
-          addChatMessage(explanation, 'ai');
-        }
-        
-        setPromptInput(generatedCode);
-        // Don't show the Generated Code panel by default
-        // setLeftPanelVisible(true);
-        
-        // Wait for sandbox creation if it's still in progress
-        if (sandboxPromise) {
-          addChatMessage('Waiting for sandbox to be ready...', 'system');
-          try {
-            await sandboxPromise;
-            // Remove the waiting message
-            setChatMessages(prev => prev.filter(msg => msg.content !== 'Waiting for sandbox to be ready...'));
-          } catch (error: any) {
-            addChatMessage('Sandbox creation failed. Cannot apply code.', 'system');
-            throw error;
-          }
-        }
-        
-        // First application for cloned site should not be in edit mode
-        await applyGeneratedCode(generatedCode, false);
-        
-        addChatMessage(
-          `Successfully recreated ${url} as a modern React app${homeContextInput ? ` with your requested context: "${homeContextInput}"` : ''}! The scraped content is now in my context, so you can ask me to modify specific sections or add features based on the original site.`, 
-          'ai',
-          {
-            scrapedUrl: url,
-            scrapedContent: scrapeData,
-            generatedCode: generatedCode
-          }
-        );
-        
-        setUrlInput('');
-        setUrlStatus([]);
-        setHomeContextInput('');
-        
-        // Clear generation progress and all screenshot/design states
-        setGenerationProgress(prev => ({
-          ...prev,
-          isGenerating: false,
-          isStreaming: false,
-          status: 'Generation complete!'
-        }));
-        
-        // Clear screenshot and preparing design states to prevent them from showing on next run
-        setUrlScreenshot(null);
-        setIsPreparingDesign(false);
-        setTargetUrl('');
-        setScreenshotError(null);
-        setLoadingStage(null); // Clear loading stage
-        
-        setTimeout(() => {
-          // Switch back to preview tab but keep files
-          setActiveTab('preview');
-        }, 1000); // Show completion briefly then switch
-      } else {
-        throw new Error('Failed to generate recreation');
-      }
-      
-    } catch (error: any) {
-      addChatMessage(`Failed to clone website: ${error.message}`, 'system');
-      setUrlStatus([]);
-      setIsPreparingDesign(false);
-      // Clear all states on error
-      setUrlScreenshot(null);
-      setTargetUrl('');
-      setScreenshotError(null);
-      setLoadingStage(null);
-      setGenerationProgress(prev => ({
-        ...prev,
-        isGenerating: false,
-        isStreaming: false,
-        status: '',
-        // Keep files to display in sidebar
-        files: prev.files
-      }));
-      setActiveTab('preview');
-    }
-  };
+//   const cloneWebsite = async () => {
+//     let url = urlInput.trim();
+//     if (!url) {
+//       setUrlStatus(prev => [...prev, 'Please enter a URL']);
+//       return;
+//     }
+//     
+//     if (!url.match(/^https?:\/\//i)) {
+//       url = 'https://' + url;
+//     }
+//     
+//     setUrlStatus([`Using: ${url}`, 'Starting to scrape...']);
+//     
+//     setUrlOverlayVisible(false);
+//     
+//     // Remove protocol for cleaner display
+//     const cleanUrl = url.replace(/^https?:\/\//i, '');
+//     addChatMessage(`Starting to clone ${cleanUrl}...`, 'system');
+//     
+//     // Capture screenshot immediately and switch to preview tab
+//     captureUrlScreenshot(url);
+//     
+//     try {
+//       addChatMessage('Scraping website content...', 'system');
+//       const scrapeResponse = await fetch('/api/scrape-url-enhanced', {
+//         method: 'POST',
+//         headers: { 'Content-Type': 'application/json' },
+//         body: JSON.stringify({ url })
+//       });
+//       
+//       if (!scrapeResponse.ok) {
+//         throw new Error(`Scraping failed: ${scrapeResponse.status}`);
+//       }
+//       
+//       const scrapeData = await scrapeResponse.json();
+//       
+//       if (!scrapeData.success) {
+//         throw new Error(scrapeData.error || 'Failed to scrape website');
+//       }
+//       
+//       addChatMessage(`Scraped ${scrapeData.content.length} characters from ${url}`, 'system');
+//       
+//       // Clear preparing design state and switch to generation tab
+//       setIsPreparingDesign(false);
+//       setActiveTab('generation');
+//       
+//       setConversationContext(prev => ({
+//         ...prev,
+//         scrapedWebsites: [...prev.scrapedWebsites, {
+//           url,
+//           content: scrapeData,
+//           timestamp: new Date()
+//         }],
+//         currentProject: `Clone of ${url}`
+//       }));
+//       
+//       // Start sandbox creation in parallel with code generation
+//       let sandboxPromise: Promise<any> | null = null;
+//       if (!sandboxData) {
+//         addChatMessage('Creating sandbox while generating your React app...', 'system');
+//         sandboxPromise = createSandbox(true);
+//       }
+//       
+//       addChatMessage('Analyzing and generating React recreation...', 'system');
+//       
+//       const recreatePrompt = `I scraped this website and want you to recreate it as a modern React application.
+// 
+// URL: ${url}
+// 
+// SCRAPED CONTENT:
+// ${scrapeData.content}
+// 
+// ${homeContextInput ? `ADDITIONAL CONTEXT/REQUIREMENTS FROM USER:
+// ${homeContextInput}
+// 
+// Please incorporate these requirements into the design and implementation.` : ''}
+// 
+// REQUIREMENTS:
+// 1. Create a COMPLETE React application with App.jsx as the main component
+// 2. App.jsx MUST import and render all other components
+// 3. Recreate the main sections and layout from the scraped content
+// 4. ${homeContextInput ? `Apply the user's context/theme: "${homeContextInput}"` : `Use a modern dark theme with excellent contrast:
+//    - Background: #0a0a0a
+//    - Text: #ffffff
+//    - Links: #60a5fa
+//    - Accent: #3b82f6`}
+// 5. Make it fully responsive
+// 6. Include hover effects and smooth transitions
+// 7. Create separate components for major sections (Header, Hero, Features, etc.)
+// 8. Use semantic HTML5 elements
+// 
+// IMPORTANT CONSTRAINTS:
+// - DO NOT use React Router or any routing libraries
+// - Use regular <a> tags with href="#section" for navigation, NOT Link or NavLink components
+// - This is a single-page application, no routing needed
+// - ALWAYS create src/App.jsx that imports ALL components
+// - Each component should be in src/components/
+// - Use Tailwind CSS for ALL styling (no custom CSS files)
+// - Make sure the app actually renders visible content
+// - Create ALL components that you reference in imports
+// 
+// IMAGE HANDLING RULES:
+// - When the scraped content includes images, USE THE ORIGINAL IMAGE URLS whenever appropriate
+// - Keep existing images from the scraped site (logos, product images, hero images, icons, etc.)
+// - Use the actual image URLs provided in the scraped content, not placeholders
+// - Only use placeholder images or generic services when no real images are available
+// - For company logos and brand images, ALWAYS use the original URLs to maintain brand identity
+// - If scraped data contains image URLs, include them in your img tags
+// - Example: If you see "https://example.com/logo.png" in the scraped content, use that exact URL
+// 
+// Focus on the key sections and content, making it clean and modern while preserving visual assets.`;
+//       
+//       setGenerationProgress(prev => ({
+//         isGenerating: true,
+//         status: 'Initializing AI...',
+//         components: [],
+//         currentComponent: 0,
+//         streamedCode: '',
+//         isStreaming: true,
+//         isThinking: false,
+//         thinkingText: undefined,
+//         thinkingDuration: undefined,
+//         // Keep previous files until new ones are generated
+//         files: prev.files || [],
+//         currentFile: undefined,
+//         lastProcessedPosition: 0
+//       }));
+//       
+//       // Switch to generation tab when starting
+//       setActiveTab('generation');
+//       
+//       const aiResponse = await fetch('/api/generate-ai-code-stream', {
+//         method: 'POST',
+//         headers: { 'Content-Type': 'application/json' },
+//         body: JSON.stringify({
+//           prompt: recreatePrompt,
+//           model: aiModel,
+//           context: {
+//             sandboxId: sandboxData?.id,
+//             structure: structureContent,
+//             conversationContext: conversationContext
+//           }
+//         })
+//       });
+//       
+//       if (!aiResponse.ok) {
+//         throw new Error(`AI generation failed: ${aiResponse.status}`);
+//       }
+//       
+//       const reader = aiResponse.body?.getReader();
+//       const decoder = new TextDecoder();
+//       let generatedCode = '';
+//       let explanation = '';
+//       
+//       if (reader) {
+//         while (true) {
+//           const { done, value } = await reader.read();
+//           if (done) break;
+//           
+//           const chunk = decoder.decode(value);
+//           const lines = chunk.split('\n');
+//           
+//           for (const line of lines) {
+//             if (line.startsWith('data: ')) {
+//               try {
+//                 const data = JSON.parse(line.slice(6));
+//                 
+//                 if (data.type === 'status') {
+//                   setGenerationProgress(prev => ({ ...prev, status: data.message }));
+//                 } else if (data.type === 'thinking') {
+//                   setGenerationProgress(prev => ({ 
+//                     ...prev, 
+//                     isThinking: true,
+//                     thinkingText: (prev.thinkingText || '') + data.text
+//                   }));
+//                 } else if (data.type === 'thinking_complete') {
+//                   setGenerationProgress(prev => ({ 
+//                     ...prev, 
+//                     isThinking: false,
+//                     thinkingDuration: data.duration
+//                   }));
+//                 } else if (data.type === 'conversation') {
+//                   // Add conversational text to chat only if it's not code
+//                   let text = data.text || '';
+//                   
+//                   // Remove package tags from the text
+//                   text = text.replace(/<package>[^<]*<\/package>/g, '');
+//                   text = text.replace(/<packages>[^<]*<\/packages>/g, '');
+//                   
+//                   // Filter out any XML tags and file content that slipped through
+//                   if (!text.includes('<file') && !text.includes('import React') && 
+//                       !text.includes('export default') && !text.includes('className=') &&
+//                       text.trim().length > 0) {
+//                     addChatMessage(text.trim(), 'ai');
+//                   }
+//                 } else if (data.type === 'stream' && data.raw) {
+//                   setGenerationProgress(prev => ({ 
+//                     ...prev, 
+//                     streamedCode: prev.streamedCode + data.text,
+//                     lastProcessedPosition: prev.lastProcessedPosition || 0
+//                   }));
+//                 } else if (data.type === 'component') {
+//                   setGenerationProgress(prev => ({
+//                     ...prev,
+//                     status: `Generated ${data.name}`,
+//                     components: [...prev.components, { 
+//                       name: data.name,
+//                       path: data.path,
+//                       completed: true
+//                     }],
+//                     currentComponent: prev.currentComponent + 1
+//                   }));
+//                 } else if (data.type === 'complete') {
+//                   generatedCode = data.generatedCode;
+//                   explanation = data.explanation;
+//                   
+//                   // Save the last generated code
+//                   setConversationContext(prev => ({
+//                     ...prev,
+//                     lastGeneratedCode: generatedCode
+//                   }));
+//                 }
+//               } catch (e) {
+//                 console.error('Error parsing streaming data:', e);
+//               }
+//             }
+//           }
+//         }
+//       }
+//       
+//       setGenerationProgress(prev => ({
+//         ...prev,
+//         isGenerating: false,
+//         isStreaming: false,
+//         status: 'Generation complete!',
+//         isEdit: prev.isEdit
+//       }));
+//       
+//       if (generatedCode) {
+//         addChatMessage('AI recreation generated!', 'system');
+//         
+//         // Add the explanation to chat if available
+//         if (explanation && explanation.trim()) {
+//           addChatMessage(explanation, 'ai');
+//         }
+//         
+//         setPromptInput(generatedCode);
+//         // Don't show the Generated Code panel by default
+//         // setLeftPanelVisible(true);
+//         
+//         // Wait for sandbox creation if it's still in progress
+//         let activeSandboxData = sandboxData;
+//         if (sandboxPromise) {
+//           addChatMessage('Waiting for sandbox to be ready...', 'system');
+//           try {
+//             const newSandboxData = await sandboxPromise;
+//             if (newSandboxData) {
+//               activeSandboxData = newSandboxData;
+//             }
+//             // Remove the waiting message
+//             setChatMessages(prev => prev.filter(msg => msg.content !== 'Waiting for sandbox to be ready...'));
+//           } catch (error: any) {
+//             addChatMessage('Sandbox creation failed. Cannot apply code.', 'system');
+//             throw error;
+//           }
+//         }
+//         
+//         // Only apply code if we have sandbox data
+//         if (activeSandboxData) {
+//           // First application for cloned site should not be in edit mode
+//           await applyGeneratedCode(generatedCode, false);
+//         }
+//         
+//         addChatMessage(
+//           `Successfully recreated ${url} as a modern React app${homeContextInput ? ` with your requested context: "${homeContextInput}"` : ''}! The scraped content is now in my context, so you can ask me to modify specific sections or add features based on the original site.`, 
+//           'ai',
+//           {
+//             scrapedUrl: url,
+//             scrapedContent: scrapeData,
+//             generatedCode: generatedCode
+//           }
+//         );
+//         
+//         setUrlInput('');
+//         setUrlStatus([]);
+//         setHomeContextInput('');
+//         
+//         // Clear generation progress and all screenshot/design states
+//         setGenerationProgress(prev => ({
+//           ...prev,
+//           isGenerating: false,
+//           isStreaming: false,
+//           status: 'Generation complete!'
+//         }));
+//         
+//         // Clear screenshot and preparing design states to prevent them from showing on next run
+//         setUrlScreenshot(null);
+//         setIsPreparingDesign(false);
+//         setTargetUrl('');
+//         setScreenshotError(null);
+//         setLoadingStage(null); // Clear loading stage
+//         setShowLoadingBackground(false); // Clear loading background
+//         
+//         setTimeout(() => {
+//           // Switch back to preview tab but keep files
+//           setActiveTab('preview');
+//         }, 1000); // Show completion briefly then switch
+//       } else {
+//         throw new Error('Failed to generate recreation');
+//       }
+//       
+//     } catch (error: any) {
+//       addChatMessage(`Failed to clone website: ${error.message}`, 'system');
+//       setUrlStatus([]);
+//       setIsPreparingDesign(false);
+//       // Clear all states on error
+//       setUrlScreenshot(null);
+//       setTargetUrl('');
+//       setScreenshotError(null);
+//       setLoadingStage(null);
+//       setGenerationProgress(prev => ({
+//         ...prev,
+//         isGenerating: false,
+//         isStreaming: false,
+//         status: '',
+//         // Keep files to display in sidebar
+//         files: prev.files
+//       }));
+//       setActiveTab('preview');
+//     }
+//   };
 
   const captureUrlScreenshot = async (url: string) => {
     setIsCapturingScreenshot(true);
@@ -2472,6 +2587,7 @@ Focus on the key sections and content, making it clean and modern while preservi
       
       const data = await response.json();
       if (data.success && data.screenshot) {
+        setIsScreenshotLoaded(false); // Reset loaded state for new screenshot
         setUrlScreenshot(data.screenshot);
         // Set preparing design state
         setIsPreparingDesign(true);
@@ -2503,6 +2619,16 @@ Focus on the key sections and content, making it clean and modern while preservi
     
     setHomeScreenFading(true);
     
+    // Set immediate loading state for better UX
+    setIsStartingNewGeneration(true);
+    setLoadingStage('gathering');
+    
+    // Immediately switch to preview tab to show loading
+    setActiveTab('preview');
+    
+    // Set loading background to ensure proper visual feedback
+    setShowLoadingBackground(true);
+    
     // Clear messages and immediately show the cloning message
     setChatMessages([]);
     let displayUrl = homeUrlInput.trim();
@@ -2514,22 +2640,25 @@ Focus on the key sections and content, making it clean and modern while preservi
     addChatMessage(`Starting to clone ${cleanUrl}...`, 'system');
     
     // Start creating sandbox and capturing screenshot immediately in parallel
-    const sandboxPromise = !sandboxData ? createSandbox(true) : Promise.resolve();
-    
-    // Only capture screenshot if we don't already have a sandbox (first generation)
-    // After sandbox is set up, skip the screenshot phase for faster generation
-    if (!sandboxData) {
-      captureUrlScreenshot(displayUrl);
-    }
+    const sandboxPromise = !sandboxData ? createSandbox(true) : Promise.resolve(null);
     
     // Set loading stage immediately before hiding home screen
     setLoadingStage('gathering');
     // Also ensure we're on preview tab to show the loading overlay
     setActiveTab('preview');
     
+    // Always capture screenshot for new URLs, even if sandbox exists
+    // This ensures the loading screen shows properly
+    captureUrlScreenshot(displayUrl);
+    
     setTimeout(async () => {
       setShowHomeScreen(false);
       setHomeScreenFading(false);
+      
+      // Clear the starting flag after transition
+      setTimeout(() => {
+        setIsStartingNewGeneration(false);
+      }, 1000);
       
       // Wait for sandbox to be ready (if it's still creating)
       await sandboxPromise;
@@ -2548,26 +2677,44 @@ Focus on the key sections and content, making it clean and modern while preservi
         
         // Screenshot is already being captured in parallel above
         
-        const scrapeResponse = await fetch('/api/scrape-url-enhanced', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url })
-        });
+        let scrapeData;
         
-        if (!scrapeResponse.ok) {
-          throw new Error('Failed to scrape website');
-        }
-        
-        const scrapeData = await scrapeResponse.json();
-        
-        if (!scrapeData.success) {
-          throw new Error(scrapeData.error || 'Failed to scrape website');
+        // Check if we have pre-scraped markdown content from search results
+        const storedMarkdown = sessionStorage.getItem('siteMarkdown');
+        if (storedMarkdown) {
+          // Use the pre-scraped content
+          scrapeData = {
+            success: true,
+            content: storedMarkdown,
+            title: new URL(url).hostname,
+            source: 'search-result'
+          };
+          sessionStorage.removeItem('siteMarkdown'); // Clear after use
+          addChatMessage('Using cached content from search results...', 'system');
+        } else {
+          // Perform fresh scraping
+          const scrapeResponse = await fetch('/api/scrape-url-enhanced', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+          });
+          
+          if (!scrapeResponse.ok) {
+            throw new Error('Failed to scrape website');
+          }
+          
+          scrapeData = await scrapeResponse.json();
+          
+          if (!scrapeData.success) {
+            throw new Error(scrapeData.error || 'Failed to scrape website');
+          }
         }
         
         setUrlStatus(['Website scraped successfully!', 'Generating React app...']);
         
         // Clear preparing design state and switch to generation tab
         setIsPreparingDesign(false);
+        setIsScreenshotLoaded(false); // Reset loaded state
         setUrlScreenshot(null); // Clear screenshot when starting generation
         setTargetUrl(''); // Clear target URL
         
@@ -2591,12 +2738,44 @@ Focus on the key sections and content, making it clean and modern while preservi
           currentProject: `${url} Clone`
         }));
         
+        // Filter out style-related context when using screenshot/URL-based generation
+        // Only keep user's explicit instructions, not inherited styles
+        let filteredContext = homeContextInput;
+        if (homeUrlInput && homeContextInput) {
+          // Check if the context contains default style names that shouldn't be inherited
+          const stylePatterns = [
+            'Glassmorphism style design',
+            'Neumorphism style design', 
+            'Brutalism style design',
+            'Minimalist style design',
+            'Dark Mode style design',
+            'Gradient Rich style design',
+            '3D Depth style design',
+            'Retro Wave style design',
+            'Modern clean and minimalist style design',
+            'Fun colorful and playful style design',
+            'Corporate professional and sleek style design',
+            'Creative artistic and unique style design'
+          ];
+          
+          // If the context exactly matches or starts with a style pattern, filter it out
+          const startsWithStyle = stylePatterns.some(pattern => 
+            homeContextInput.trim().startsWith(pattern)
+          );
+          
+          if (startsWithStyle) {
+            // Extract only the additional instructions part after the style
+            const additionalMatch = homeContextInput.match(/\. (.+)$/);
+            filteredContext = additionalMatch ? additionalMatch[1] : '';
+          }
+        }
+        
         const prompt = `I want to recreate the ${url} website as a complete React application based on the scraped content below.
 
 ${JSON.stringify(scrapeData, null, 2)}
 
-${homeContextInput ? `ADDITIONAL CONTEXT/REQUIREMENTS FROM USER:
-${homeContextInput}
+${filteredContext ? `ADDITIONAL CONTEXT/REQUIREMENTS FROM USER:
+${filteredContext}
 
 Please incorporate these requirements into the design and implementation.` : ''}
 
@@ -2609,7 +2788,7 @@ IMPORTANT INSTRUCTIONS:
 - Create proper component structure
 - Make sure the app actually renders visible content
 - Create ALL components that you reference in imports
-${homeContextInput ? '- Apply the user\'s context/theme requirements throughout the application' : ''}
+${filteredContext ? '- Apply the user\'s context/theme requirements throughout the application' : ''}
 
 Focus on the key sections and content, making it clean and modern.`;
         
@@ -2859,11 +3038,14 @@ Focus on the key sections and content, making it clean and modern.`;
         }));
         
         // Clear screenshot and preparing design states to prevent them from showing on next run
+        setIsScreenshotLoaded(false); // Reset loaded state
         setUrlScreenshot(null);
         setIsPreparingDesign(false);
         setTargetUrl('');
         setScreenshotError(null);
         setLoadingStage(null); // Clear loading stage
+        setIsStartingNewGeneration(false); // Clear new generation flag
+        setShowLoadingBackground(false); // Clear loading background
         
         setTimeout(() => {
           // Switch back to preview tab but keep files
@@ -2873,6 +3055,8 @@ Focus on the key sections and content, making it clean and modern.`;
         addChatMessage(`Failed to clone website: ${error.message}`, 'system');
         setUrlStatus([]);
         setIsPreparingDesign(false);
+        setIsStartingNewGeneration(false); // Clear new generation flag on error
+        setLoadingStage(null);
         // Also clear generation progress on error
         setGenerationProgress(prev => ({
           ...prev,
@@ -2889,248 +3073,7 @@ Focus on the key sections and content, making it clean and modern.`;
   return (
     <HeaderProvider>
       <div className="font-sans bg-background text-foreground h-screen flex flex-col">
-      {/* Home Screen Overlay */}
-      {showHomeScreen && (
-        <div className={`fixed inset-0 z-50 transition-opacity duration-500 ${homeScreenFading ? 'opacity-0' : 'opacity-100'}`}>
-          {/* Clean Background */}
-          <div className="absolute inset-0 bg-white overflow-hidden">
-          </div>
-          
-          
-          {/* Close button on hover */}
-          <button
-            onClick={() => {
-              setHomeScreenFading(true);
-              setTimeout(() => {
-                setShowHomeScreen(false);
-                setHomeScreenFading(false);
-              }, 500);
-            }}
-            className="absolute top-8 right-8 text-gray-500 hover:text-gray-700 transition-all duration-300 opacity-0 hover:opacity-100 bg-white/80 backdrop-blur-sm p-2 rounded-lg shadow-sm"
-            style={{ opacity: 0 }}
-            onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
-            onMouseLeave={(e) => e.currentTarget.style.opacity = '0'}
-          >
-            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-          
-          {/* Header */}
-          <div className="absolute top-0 left-0 right-0 z-20 px-6 py-4 flex items-center justify-between animate-[fadeIn_0.8s_ease-out]">
-            <HeaderBrandKit />
-            <a 
-              href="https://github.com/mendableai/open-lovable" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-6 px-6 py-8 rounded-8 text-label-medium font-medium text-accent-black hover:bg-black-alpha-4 active:bg-black-alpha-6 transition-all duration-200"
-            >
-              <FiGithub style={{ width: '16px', height: '16px' }} />
-              <span>Use this Template</span>
-            </a>
-          </div>
-          
-          {/* Main content */}
-          <div className="relative z-10 h-full flex items-center justify-center px-4">
-            <div className="text-center max-w-4xl min-w-[600px] mx-auto">
-              {/* Firecrawl-style Header */}
-              <div className="text-center">
-                <h1 className="text-[2.5rem] lg:text-[3.8rem] text-center text-[#36322F] font-semibold tracking-tight leading-[0.9] animate-[fadeIn_0.8s_ease-out]">
-                  <span className="hidden md:inline">Open Lovable</span>
-                  <span className="md:hidden">Open Lovable</span>
-                </h1>
-                <motion.p 
-                  className="text-base lg:text-lg max-w-lg mx-auto mt-2.5 text-zinc-500 text-center text-balance"
-                  animate={{
-                    opacity: showStyleSelector ? 0.7 : 1
-                  }}
-                  transition={{ duration: 0.3, ease: "easeOut" }}
-                >
-                  Re-imagine any website, in seconds.
-                </motion.p>
-              </div>
-              
-              <form onSubmit={handleHomeScreenSubmit} className="mt-5 max-w-3xl mx-auto">
-                <div className="w-full relative group">
-                  <input
-                    type="text"
-                    value={homeUrlInput}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      setHomeUrlInput(value);
-                      
-                      // Check if it's a valid domain
-                      const domainRegex = /^(https?:\/\/)?(([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(\/?.*)?$/;
-                      if (domainRegex.test(value) && value.length > 5) {
-                        // Small delay to make the animation feel smoother
-                        setTimeout(() => setShowStyleSelector(true), 100);
-                      } else {
-                        setShowStyleSelector(false);
-                        setSelectedStyle(null);
-                      }
-                    }}
-                    placeholder=" "
-                    aria-placeholder="https://firecrawl.dev"
-                    className="h-[3.25rem] w-full resize-none focus-visible:outline-none focus-visible:ring-orange-500 focus-visible:ring-2 rounded-[18px] text-sm text-[#36322F] px-4 pr-12 border-[.75px] border-border bg-white"
-                    style={{
-                      boxShadow: '0 0 0 1px #e3e1de66, 0 1px 2px #5f4a2e14, 0 4px 6px #5f4a2e0a, 0 40px 40px -24px #684b2514',
-                      filter: 'drop-shadow(rgba(249, 224, 184, 0.3) -0.731317px -0.731317px 35.6517px)'
-                    }}
-                    autoFocus
-                  />
-                  <div 
-                    aria-hidden="true" 
-                    className={`absolute top-1/2 -translate-y-1/2 left-4 pointer-events-none text-sm text-opacity-50 text-start transition-opacity ${
-                      homeUrlInput ? 'opacity-0' : 'opacity-100'
-                    }`}
-                  >
-                    <span className="text-[#605A57]/50" style={{ fontFamily: 'monospace' }}>
-                      https://firecrawl.dev
-                    </span>
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={!homeUrlInput.trim()}
-                    className="absolute top-1/2 transform -translate-y-1/2 right-2 flex h-10 items-center justify-center rounded-md px-3 text-sm font-medium text-zinc-500 hover:text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950 focus-visible:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    title={selectedStyle ? `Clone with ${selectedStyle} Style` : 'Clone Website'}
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="9 10 4 15 9 20"></polyline>
-                      <path d="M20 4v7a4 4 0 0 1-4 4H4"></path>
-                    </svg>
-                  </button>
-                </div>
-                  
-                  {/* Style Selector - Slides out when valid domain is entered */}
-                  {showStyleSelector && (
-                    <div className="overflow-hidden mt-4">
-                      <div className={`transition-all duration-500 ease-out transform ${
-                        showStyleSelector ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0'
-                      }`}>
-                    <div className="bg-white/80 backdrop-blur-sm border border-gray-200 rounded-xl p-4 shadow-sm">
-                      <p className="text-sm text-gray-600 mb-3 font-medium">How do you want your site to look?</p>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                        {[
-                          { name: 'Neobrutalist', description: 'Bold colors, thick borders' },
-                          { name: 'Glassmorphism', description: 'Frosted glass effects' },
-                          { name: 'Minimalist', description: 'Clean and simple' },
-                          { name: 'Dark Mode', description: 'Dark theme' },
-                          { name: 'Gradient', description: 'Colorful gradients' },
-                          { name: 'Retro', description: '80s/90s aesthetic' },
-                          { name: 'Modern', description: 'Contemporary design' },
-                          { name: 'Monochrome', description: 'Black and white' }
-                        ].map((style) => (
-                          <button
-                            key={style.name}
-                            type="button"
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                // Submit the form
-                                const form = e.currentTarget.closest('form');
-                                if (form) {
-                                  form.requestSubmit();
-                                }
-                              }
-                            }}
-                            onClick={() => {
-                              if (selectedStyle === style.name) {
-                                // Deselect if clicking the same style
-                                setSelectedStyle(null);
-                                // Keep only additional context, remove the style theme part
-                                const currentAdditional = homeContextInput.replace(/^[^,]+theme\s*,?\s*/, '').trim();
-                                setHomeContextInput(currentAdditional);
-                              } else {
-                                // Select new style
-                                setSelectedStyle(style.name);
-                                // Extract any additional context (everything after the style theme)
-                                const currentAdditional = homeContextInput.replace(/^[^,]+theme\s*,?\s*/, '').trim();
-                                setHomeContextInput(style.name.toLowerCase() + ' theme' + (currentAdditional ? ', ' + currentAdditional : ''));
-                              }
-                            }}
-                            className={`p-3 rounded-lg border transition-all ${
-                              selectedStyle === style.name
-                                ? 'border-orange-400 bg-orange-50 text-gray-900 shadow-sm'
-                                : 'border-gray-200 bg-white hover:border-orange-200 hover:bg-orange-50/50 text-gray-700'
-                            }`}
-                          >
-                            <div className="text-sm font-medium">{style.name}</div>
-                            <div className="text-xs text-gray-500 mt-1">{style.description}</div>
-                          </button>
-                        ))}
-                      </div>
-                      
-                      {/* Additional context input - part of the style selector */}
-                      <div className="mt-4 mb-2">
-                        <input
-                          type="text"
-                          value={(() => {
-                            if (!selectedStyle) return homeContextInput;
-                            // Extract additional context by removing the style theme part
-                            const additional = homeContextInput.replace(new RegExp('^' + selectedStyle.toLowerCase() + ' theme\\s*,?\\s*', 'i'), '');
-                            return additional;
-                          })()}
-                          onChange={(e) => {
-                            const additionalContext = e.target.value;
-                            if (selectedStyle) {
-                              setHomeContextInput(selectedStyle.toLowerCase() + ' theme' + (additionalContext.trim() ? ', ' + additionalContext : ''));
-                            } else {
-                              setHomeContextInput(additionalContext);
-                            }
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              const form = e.currentTarget.closest('form');
-                              if (form) {
-                                form.requestSubmit();
-                              }
-                            }
-                          }}
-                          placeholder="Add more details: specific features, color preferences..."
-                          className="w-full px-4 py-2 text-sm bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-orange-300 focus:ring-2 focus:ring-orange-100 transition-all duration-200"
-                        />
-                      </div>
-                    </div>
-                      </div>
-                    </div>
-                  )}
-              </form>
-              
-              {/* Model Selector */}
-              <div className="mt-6 flex items-center justify-center animate-[fadeIn_1s_ease-out]">
-                <select
-                  value={aiModel}
-                  onChange={(e) => {
-                    const newModel = e.target.value;
-                    setAiModel(newModel);
-                    const params = new URLSearchParams(searchParams);
-                    params.set('model', newModel);
-                    if (sandboxData?.sandboxId) {
-                      params.set('sandbox', sandboxData.sandboxId);
-                    }
-                    router.push(`/generation?${params.toString()}`);
-                  }}
-                  className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-[10px] focus:outline-none focus:ring-2 focus:ring-[#36322F] focus:border-transparent"
-                  style={{
-                    boxShadow: '0 0 0 1px #e3e1de66, 0 1px 2px #5f4a2e14'
-                  }}
-                >
-                  {appConfig.ai.availableModels.map(model => (
-                    <option key={model} value={model}>
-                      {model.includes('claude') ? `Claude ${model.split('-')[2]}` : 
-                       model.includes('gpt') ? `GPT-${model.split('-')[1]}` : model}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      
-      <div className="bg-white p-[15px] border-b border-border-faint flex items-center justify-between shadow-sm">
+      <div className="bg-white py-[15px] py-[8px] border-b border-border-faint flex items-center justify-between shadow-sm">
         <HeaderBrandKit />
         <div className="flex items-center gap-2">
           {/* Model Selector - Left side */}
@@ -3183,10 +3126,7 @@ Focus on the key sections and content, making it clean and modern.`;
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
             </svg>
           </button>
-          <div className={`inline-flex items-center gap-1.5 ${status.active ? 'bg-gray-50 border border-gray-200 text-gray-700' : 'bg-gray-100 border border-gray-200 text-gray-600'} px-4 py-1.5 rounded-lg text-sm font-medium`}>
-            <span id="status-text">{status.text}</span>
-            <div className={`w-1.5 h-1.5 rounded-full ${status.active ? 'bg-green-500' : 'bg-gray-400'}`} />
-          </div>
+       
         </div>
       </div>
 
@@ -3194,8 +3134,8 @@ Focus on the key sections and content, making it clean and modern.`;
         {/* Center Panel - AI Chat (1/3 of remaining width) */}
         <div className="flex-1 max-w-[400px] flex flex-col border-r border-border bg-background">
           {/* Sidebar Input Component */}
-          <div className="p-4 border-b border-border">
-            {!hasInitialSubmission ? (
+          {!hasInitialSubmission ? (
+            <div className="p-4 border-b border-border">
               <SidebarInput
                 onSubmit={(url, style, model, instructions) => {
                   // Mark that we've had an initial submission
@@ -3217,90 +3157,64 @@ Focus on the key sections and content, making it clean and modern.`;
                 }}
                 disabled={loading || generationProgress.isGenerating}
               />
-            ) : (
-              <SidebarQuickInput
-                onSubmit={(url) => {
-                  // Clear all previous generation data for a fresh start
-                  setChatMessages([{
-                    content: 'Starting fresh generation...',
-                    type: 'system',
-                    timestamp: new Date()
-                  }]);
-                  setGenerationProgress({
-                    isGenerating: false,
-                    isThinking: false,
-                    thinkingText: '',
-                    thinkingDuration: 0,
-                    files: [],
-                    currentFile: undefined,
-                    streamedCode: '',
-                    components: [],
-                    currentComponent: 0,
-                    status: '',
-                    isEdit: false
-                  });
-                  setConversationContext({
-                    scrapedWebsites: [],
-                    generatedComponents: [],
-                    appliedCode: [],
-                    currentProject: '',
-                    lastGeneratedCode: undefined
-                  });
-                  setSandboxFiles({});
-                  setFileStructure('');
-                  setSelectedFile(null);
-                  setUrlScreenshot(null);
-                  setScreenshotError(null);
-                  
-                  // For subsequent submissions, use the previously selected style and model
-                  const prevStyle = sessionStorage.getItem('selectedStyle') || '1';
-                  const prevModel = sessionStorage.getItem('selectedModel') || appConfig.ai.defaultModel;
-                  
-                  // Store the configuration in sessionStorage
-                  sessionStorage.setItem('targetUrl', url);
-                  sessionStorage.setItem('selectedStyle', prevStyle);
-                  sessionStorage.setItem('selectedModel', prevModel);
-                  sessionStorage.setItem('autoStart', 'true');
-                  
-                  // Start generation using the existing logic
-                  setHomeUrlInput(url);
-                  setHomeContextInput('');
-                  startGeneration();
-                }}
-                disabled={loading || generationProgress.isGenerating}
-              />
-            )}
-          </div>
+            </div>
+          ) : null}
 
           {conversationContext.scrapedWebsites.length > 0 && (
-            <div className="p-4 bg-card">
-              <div className="flex flex-col gap-2">
+            <div className="p-4 bg-card border-b border-gray-200">
+              <div className="flex flex-col gap-4">
                 {conversationContext.scrapedWebsites.map((site, idx) => {
                   // Extract favicon and site info from the scraped data
                   const metadata = site.content?.metadata || {};
                   const sourceURL = metadata.sourceURL || site.url;
-                  const favicon = metadata.favicon || `https://www.google.com/s2/favicons?domain=${new URL(sourceURL).hostname}&sz=32`;
+                  const favicon = metadata.favicon || `https://www.google.com/s2/favicons?domain=${new URL(sourceURL).hostname}&sz=128`;
                   const siteName = metadata.ogSiteName || metadata.title || new URL(sourceURL).hostname;
+                  const screenshot = site.content?.screenshot || sessionStorage.getItem('websiteScreenshot');
                   
                   return (
-                    <div key={idx} className="flex items-center gap-2 text-sm">
-                      <img 
-                        src={favicon} 
-                        alt={siteName}
-                        className="w-5 h-5 rounded"
-                        onError={(e) => {
-                          e.currentTarget.src = `https://www.google.com/s2/favicons?domain=${new URL(sourceURL).hostname}&sz=32`;
-                        }}
-                      />
-                      <a 
-                        href={sourceURL} 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="text-black hover:text-gray-700 truncate max-w-[250px]"
-                        title={sourceURL}
-                      >
-                        {siteName}
-                      </a>
+                    <div key={idx} className="flex flex-col gap-3">
+                      {/* Site info with favicon */}
+                      <div className="flex items-center gap-4 text-sm">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img 
+                          src={favicon} 
+                          alt={siteName}
+                          className="w-16 h-16 rounded"
+                          onError={(e) => {
+                            e.currentTarget.src = `https://www.google.com/s2/favicons?domain=${new URL(sourceURL).hostname}&sz=128`;
+                          }}
+                        />
+                        <a 
+                          href={sourceURL} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="text-black hover:text-gray-700 truncate max-w-[250px] font-medium"
+                          title={sourceURL}
+                        >
+                          {siteName}
+                        </a>
+                      </div>
+                      
+                      {/* Pinned screenshot */}
+                      {screenshot && (
+                        <div 
+                          className="w-full rounded-lg overflow-hidden border border-gray-200 transition-all duration-300"
+                          style={{ 
+                            opacity: sidebarScrolled ? 0 : 1,
+                            transform: sidebarScrolled ? 'translateY(-20px)' : 'translateY(0)',
+                            pointerEvents: sidebarScrolled ? 'none' : 'auto',
+                            maxHeight: sidebarScrolled ? '0' : '200px'
+                          }}
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img 
+                            src={screenshot}
+                            alt={`${siteName} preview`}
+                            className="w-full h-auto object-cover"
+                            style={{ maxHeight: '200px' }}
+                          />
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -3308,7 +3222,13 @@ Focus on the key sections and content, making it clean and modern.`;
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-1 scrollbar-hide" ref={chatMessagesRef}>
+          <div 
+            className="flex-1 overflow-y-auto p-6 flex flex-col gap-4 scrollbar-hide" 
+            ref={chatMessagesRef}
+            onScroll={(e) => {
+              const scrollTop = e.currentTarget.scrollTop;
+              setSidebarScrolled(scrollTop > 50);
+            }}>
             {chatMessages.map((msg, idx) => {
               // Check if this message is from a successful generation
               const isGenerationComplete = msg.content.includes('Successfully recreated') || 
@@ -3316,13 +3236,13 @@ Focus on the key sections and content, making it clean and modern.`;
                                          msg.content.includes('Code generated!');
               
               // Get the files from metadata if this is a completion message
-              const completedFiles = msg.metadata?.appliedFiles || [];
+              // const completedFiles = msg.metadata?.appliedFiles || [];
               
               return (
                 <div key={idx} className="block">
-                  <div className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'} mb-1`}>
+                  <div className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
                     <div className="block">
-                      <div className={`block rounded-[10px] px-12 py-6 ${
+                      <div className={`block rounded-[10px] px-14 py-8 ${
                         msg.type === 'user' ? 'bg-[#36322F] text-white ml-auto max-w-[80%]' :
                         msg.type === 'ai' ? 'bg-gray-100 text-gray-900 mr-auto max-w-[80%]' :
                         msg.type === 'system' ? 'bg-[#36322F] text-white text-sm' :
@@ -3358,13 +3278,13 @@ Focus on the key sections and content, making it clean and modern.`;
                         </div>
                       </div>
                     ) : (
-                      msg.content
+                      <span className="text-body-input">{msg.content}</span>
                     )}
                       </div>
                   
                       {/* Show applied files if this is an apply success message */}
                       {msg.metadata?.appliedFiles && msg.metadata.appliedFiles.length > 0 && (
-                    <div className="mt-4 inline-block bg-gray-100 rounded-[10px] p-4">
+                    <div className="mt-3 inline-block bg-gray-100 rounded-[10px] p-5">
                       <div className="text-xs font-medium mb-3 text-gray-700">
                         {msg.content.includes('Applied') ? 'Files Updated:' : 'Generated Files:'}
                       </div>
@@ -3404,7 +3324,7 @@ Focus on the key sections and content, making it clean and modern.`;
                         {generationProgress.files.map((file, fileIdx) => (
                           <div
                             key={`complete-${fileIdx}`}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#36322F] text-white rounded-[10px] text-xs animate-fade-in-up"
+                            className="inline-flex items-center gap-1.5 px-6 py-1.5 bg-[#36322F] text-white rounded-[10px] text-xs animate-fade-in-up"
                             style={{ animationDelay: `${fileIdx * 30}ms` }}
                           >
                             <span className={`inline-block w-1.5 h-1.5 rounded-full ${
@@ -3441,7 +3361,7 @@ Focus on the key sections and content, making it clean and modern.`;
                   {generationProgress.files.map((file, idx) => (
                     <div
                       key={`file-${idx}`}
-                      className="inline-flex items-center gap-1 px-6 py-1 bg-[#36322F] text-white rounded-[10px] text-xs animate-fade-in-up"
+                      className="inline-flex items-center gap-1.5 px-6 py-1.5 bg-[#36322F] text-white rounded-[10px] text-xs animate-fade-in-up"
                       style={{ animationDelay: `${idx * 30}ms` }}
                     >
                       <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -3477,7 +3397,7 @@ Focus on the key sections and content, making it clean and modern.`;
                       </div>
                       <div className="flex-1 h-px bg-gradient-to-r from-gray-300 to-transparent" />
                     </div>
-                    <div className="bg-gray-900 border border-gray-700 rounded max-h-32 overflow-y-auto scrollbar-hide">
+                    <div className="bg-gray-900 border border-gray-700 rounded max-h-128 overflow-y-auto scrollbar-hide">
                       <SyntaxHighlighter
                         language="jsx"
                         style={vscDarkPlus}
@@ -3512,82 +3432,87 @@ Focus on the key sections and content, making it clean and modern.`;
               onChange={setAiChatInput}
               onSubmit={sendChatMessage}
               placeholder="Describe what you want to build..."
+              showSearchFeatures={false}
             />
           </div>
         </div>
 
         {/* Right Panel - Preview or Generation (2/3 of remaining width) */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="px-3 py-[9.5px] bg-white border-b border-gray-200 flex justify-between items-center">
-            <div className="flex items-center gap-4">
-              <div className="flex gap-1">
+          <div className="px-3 pt-4 pb-4 bg-white border-b border-gray-200 flex justify-between items-center">
+            <div className="flex items-center gap-2">
+              {/* Toggle-style Code/View switcher */}
+              <div className="inline-flex bg-gray-100 border border-gray-200 rounded-md p-0.5">
                 <button
                   onClick={() => setActiveTab('generation')}
-                  className={`p-8 rounded-lg transition-colors ${
+                  className={`px-3 py-1 rounded transition-all text-xs font-medium ${
                     activeTab === 'generation' 
-                      ? 'bg-white border border-gray-200 text-gray-900 shadow-sm' 
-                      : 'bg-gray-50 border border-gray-200 text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                      ? 'bg-white text-gray-900 shadow-sm' 
+                      : 'bg-transparent text-gray-600 hover:text-gray-900'
                   }`}
-                  title="Code"
                 >
-                  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-                  </svg>
+                  <div className="flex items-center gap-1.5">
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                    </svg>
+                    <span>Code</span>
+                  </div>
                 </button>
                 <button
                   onClick={() => setActiveTab('preview')}
-                  className={`p-8 rounded-lg transition-colors ${
+                  className={`px-3 py-1 rounded transition-all text-xs font-medium ${
                     activeTab === 'preview' 
-                      ? 'bg-white border border-gray-200 text-gray-900 shadow-sm' 
-                      : 'bg-gray-50 border border-gray-200 text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                      ? 'bg-white text-gray-900 shadow-sm' 
+                      : 'bg-transparent text-gray-600 hover:text-gray-900'
                   }`}
-                  title="Preview"
                 >
-                  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                  </svg>
+                  <div className="flex items-center gap-1.5">
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                    </svg>
+                    <span>View</span>
+                  </div>
                 </button>
               </div>
             </div>
             <div className="flex gap-2 items-center">
-              {/* Live Code Generation Status - Moved to far right */}
-              {activeTab === 'generation' && (generationProgress.isGenerating || generationProgress.files.length > 0) && (
-                <div className="flex items-center gap-3">
-                  {!generationProgress.isEdit && (
-                    <div className="text-gray-600 text-sm">
-                      {generationProgress.files.length} files generated
-                    </div>
-                  )}
-                  <div className={`inline-flex items-center gap-1.5 ${generationProgress.isGenerating ? 'bg-gray-50 border border-gray-200 text-gray-700' : 'bg-gray-100 text-gray-600'} px-3 py-1.5 rounded-lg text-sm font-medium`}>
-                    {generationProgress.isGenerating ? (
-                      <>
-                        <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-                        {generationProgress.isEdit ? 'Editing code' : 'Live code generation'}
-                      </>
-                    ) : (
-                      <>
-                        <div className="w-1.5 h-1.5 bg-gray-400 rounded-full" />
-                        Complete
-                      </>
-                    )}
-                  </div>
+              {/* Files generated count */}
+              {activeTab === 'generation' && !generationProgress.isEdit && generationProgress.files.length > 0 && (
+                <div className="text-gray-500 text-xs font-medium">
+                  {generationProgress.files.length} files generated
                 </div>
               )}
-              {sandboxData && !generationProgress.isGenerating && (
-                <>
-                  <a 
-                    href={sandboxData.url} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    title="Open in new tab"
-                    className="p-8 rounded-lg transition-colors bg-gray-50 border border-gray-200 text-gray-700 hover:bg-gray-100 inline-block"
-                  >
-                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                  </a>
-                </>
+              
+              {/* Live Code Generation Status */}
+              {activeTab === 'generation' && generationProgress.isGenerating && (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gray-100 border border-gray-200 rounded-md text-xs font-medium text-gray-700">
+                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                  {generationProgress.isEdit ? 'Editing code' : 'Live generation'}
+                </div>
+              )}
+              
+              {/* Sandbox Status Indicator */}
+              {sandboxData && (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gray-100 border border-gray-200 rounded-md text-xs font-medium text-gray-700">
+                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full" />
+                  Sandbox active
+                </div>
+              )}
+              
+              {/* Open in new tab button */}
+              {sandboxData && (
+                <a 
+                  href={sandboxData.url} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  title="Open in new tab"
+                  className="p-1.5 rounded-md transition-all text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+                >
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                </a>
               )}
             </div>
           </div>
@@ -3602,5 +3527,13 @@ Focus on the key sections and content, making it clean and modern.`;
 
     </div>
     </HeaderProvider>
+  );
+}
+
+export default function Page() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-screen">Loading...</div>}>
+      <AISandboxPage />
+    </Suspense>
   );
 }

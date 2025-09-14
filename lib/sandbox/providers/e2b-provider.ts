@@ -1,17 +1,34 @@
 import { Sandbox } from '@e2b/code-interpreter';
-import { SandboxProvider, SandboxInfo, CommandResult, SandboxProviderConfig } from '../types';
+import { SandboxProvider, SandboxInfo, CommandResult } from '../types';
+// SandboxProviderConfig available through parent class
 import { appConfig } from '@/config/app.config';
 
 export class E2BProvider extends SandboxProvider {
   private existingFiles: Set<string> = new Set();
 
+  /**
+   * Attempt to reconnect to an existing E2B sandbox
+   */
+  async reconnect(sandboxId: string): Promise<boolean> {
+    try {
+      
+      // Try to connect to existing sandbox
+      // Note: E2B SDK doesn't directly support reconnection, but we can try to recreate
+      // For now, return false to indicate reconnection isn't supported
+      // In the future, E2B may add this capability
+      
+      return false;
+    } catch (error) {
+      console.error(`[E2BProvider] Failed to reconnect to sandbox ${sandboxId}:`, error);
+      return false;
+    }
+  }
+
   async createSandbox(): Promise<SandboxInfo> {
     try {
-      console.log('[E2BProvider] Creating sandbox...');
       
       // Kill existing sandbox if any
       if (this.sandbox) {
-        console.log('[E2BProvider] Killing existing sandbox...');
         try {
           await this.sandbox.kill();
         } catch (e) {
@@ -24,7 +41,6 @@ export class E2BProvider extends SandboxProvider {
       this.existingFiles.clear();
 
       // Create base sandbox
-      console.log(`[E2BProvider] Creating E2B sandbox with ${appConfig.e2b.timeoutMinutes} minute timeout...`);
       this.sandbox = await Sandbox.create({ 
         apiKey: this.config.e2b?.apiKey || process.env.E2B_API_KEY,
         timeoutMs: this.config.e2b?.timeoutMs || appConfig.e2b.timeoutMs
@@ -33,8 +49,6 @@ export class E2BProvider extends SandboxProvider {
       const sandboxId = (this.sandbox as any).sandboxId || Date.now().toString();
       const host = (this.sandbox as any).getHost(appConfig.e2b.vitePort);
       
-      console.log(`[E2BProvider] Sandbox created: ${sandboxId}`);
-      console.log(`[E2BProvider] Sandbox host: ${host}`);
 
       this.sandboxInfo = {
         sandboxId,
@@ -46,7 +60,6 @@ export class E2BProvider extends SandboxProvider {
       // Set extended timeout on the sandbox instance if method available
       if (typeof this.sandbox.setTimeout === 'function') {
         this.sandbox.setTimeout(appConfig.e2b.timeoutMs);
-        console.log(`[E2BProvider] Set sandbox timeout to ${appConfig.e2b.timeoutMinutes} minutes`);
       }
 
       return this.sandboxInfo;
@@ -62,7 +75,6 @@ export class E2BProvider extends SandboxProvider {
       throw new Error('No active sandbox');
     }
 
-    console.log(`[E2BProvider] Executing: ${command}`);
     
     const result = await this.sandbox.runCode(`
       import subprocess
@@ -105,7 +117,6 @@ export class E2BProvider extends SandboxProvider {
     if ((this.sandbox as any).files && typeof (this.sandbox as any).files.write === 'function') {
       // Use the files.write API if available
       await (this.sandbox as any).files.write(fullPath, Buffer.from(content));
-      console.log(`[E2BProvider] Written file using files.write: ${fullPath}`);
     } else {
       // Fallback to Python code execution
       await this.sandbox.runCode(`
@@ -120,7 +131,6 @@ export class E2BProvider extends SandboxProvider {
             f.write(${JSON.stringify(content)})
         print(f"✓ Written: ${fullPath}")
       `);
-      console.log(`[E2BProvider] Written file using Python: ${fullPath}`);
     }
     
     this.existingFiles.add(path);
@@ -180,7 +190,6 @@ export class E2BProvider extends SandboxProvider {
     const packageList = packages.join(' ');
     const flags = appConfig.packages.useLegacyPeerDeps ? '--legacy-peer-deps' : '';
     
-    console.log(`[E2BProvider] Installing packages: ${packageList}`);
     
     const result = await this.sandbox.runCode(`
       import subprocess
@@ -224,7 +233,6 @@ export class E2BProvider extends SandboxProvider {
       throw new Error('No active sandbox');
     }
 
-    console.log('[E2BProvider] Setting up Vite React app...');
     
     // Write all files in a single Python script
     const setupScript = `
@@ -274,7 +282,7 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     hmr: false,
-    allowedHosts: ['.e2b.app', 'localhost', '127.0.0.1']
+    allowedHosts: ['.e2b.app', '.e2b.dev', '.vercel.run', 'localhost', '127.0.0.1']
   }
 })"""
 
@@ -385,7 +393,6 @@ print('\\nAll files created successfully!')
     await this.sandbox.runCode(setupScript);
     
     // Install dependencies
-    console.log('[E2BProvider] Installing dependencies...');
     await this.sandbox.runCode(`
 import subprocess
 
@@ -404,7 +411,6 @@ else:
     `);
     
     // Start Vite dev server
-    console.log('[E2BProvider] Starting Vite dev server...');
     await this.sandbox.runCode(`
 import subprocess
 import os
@@ -450,7 +456,6 @@ print('Waiting for server to be ready...')
       throw new Error('No active sandbox');
     }
 
-    console.log('[E2BProvider] Restarting Vite server...');
     
     await this.sandbox.runCode(`
 import subprocess
@@ -491,7 +496,6 @@ print(f'✓ Vite restarted with PID: {process.pid}')
 
   async terminate(): Promise<void> {
     if (this.sandbox) {
-      console.log('[E2BProvider] Terminating sandbox...');
       try {
         await this.sandbox.kill();
       } catch (e) {

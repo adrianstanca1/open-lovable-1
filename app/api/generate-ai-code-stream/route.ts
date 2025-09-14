@@ -194,7 +194,7 @@ export async function POST(request: NextRequest) {
           if (manifest) {
             await sendProgress({ type: 'status', message: '🔍 Creating search plan...' });
             
-            const fileContents = global.sandboxState.fileCache.files;
+            const fileContents = global.sandboxState.fileCache?.files || {};
             console.log('[generate-ai-code-stream] Files available for search:', Object.keys(fileContents).length);
             
             // STEP 1: Get search plan from AI
@@ -244,8 +244,9 @@ export async function POST(request: NextRequest) {
                     console.log('[generate-ai-code-stream] Target selected:', target);
                     
                     // Create surgical edit context with exact location
-                    const normalizedPath = target.filePath.replace('/home/user/app/', '');
-                    const fileContent = fileContents[normalizedPath]?.content || '';
+                    // normalizedPath would be: target.filePath.replace('/home/user/app/', '');
+                    // fileContent available but not used in current implementation
+                    // const fileContent = fileContents[normalizedPath]?.content || '';
                     
                     // Build enhanced context with search results
                     enhancedSystemPrompt = `
@@ -355,7 +356,7 @@ User request: "${prompt}"`;
                         
                         // For now, fall back to keyword search since we don't have file contents for search execution
                         // This path happens when no manifest was initially available
-                        let targetFiles = [];
+                        let targetFiles: any[] = [];
                         if (!searchPlan || searchPlan.searchTerms.length === 0) {
                           console.warn('[generate-ai-code-stream] No target files after fetch, searching for relevant files');
                           
@@ -984,13 +985,15 @@ CRITICAL: When files are provided in the context:
                   // Store files in cache
                   for (const [path, content] of Object.entries(filesData.files)) {
                     const normalizedPath = path.replace('/home/user/app/', '');
-                    global.sandboxState.fileCache.files[normalizedPath] = {
-                      content: content as string,
-                      lastModified: Date.now()
-                    };
+                    if (global.sandboxState.fileCache) {
+                      global.sandboxState.fileCache.files[normalizedPath] = {
+                        content: content as string,
+                        lastModified: Date.now()
+                      };
+                    }
                   }
                   
-                  if (filesData.manifest) {
+                  if (filesData.manifest && global.sandboxState.fileCache) {
                     global.sandboxState.fileCache.manifest = filesData.manifest;
                     
                     // Now try to analyze edit intent with the fetched manifest
@@ -1022,7 +1025,7 @@ CRITICAL: When files are provided in the context:
                   }
                   
                   // Update variables
-                  backendFiles = global.sandboxState.fileCache.files;
+                  backendFiles = global.sandboxState.fileCache?.files || {};
                   hasBackendFiles = Object.keys(backendFiles).length > 0;
                   console.log('[generate-ai-code-stream] Updated backend cache with fetched files');
                 }
@@ -1294,26 +1297,59 @@ It's better to have 3 complete files than 10 incomplete files.`
         }
         
         let result;
-        try {
-          result = await streamText(streamOptions);
-        } catch (streamError) {
-          console.error('[generate-ai-code-stream] Error calling streamText:', streamError);
-          
-          // Send specific error for debugging
-          await sendProgress({ 
-            type: 'error', 
-            message: `Failed to initialize ${isGoogle ? 'Gemini' : isAnthropic ? 'Claude' : isOpenAI ? 'GPT-5' : 'Groq'} streaming: ${(streamError as Error).message}` 
-          });
-          
-          // If this is a Google model error, provide helpful info
-          if (isGoogle) {
-            await sendProgress({ 
-              type: 'info', 
-              message: 'Tip: Make sure your GEMINI_API_KEY is set correctly and has proper permissions.' 
-            });
+        let retryCount = 0;
+        const maxRetries = 2;
+        
+        while (retryCount <= maxRetries) {
+          try {
+            result = await streamText(streamOptions);
+            break; // Success, exit retry loop
+          } catch (streamError: any) {
+            console.error(`[generate-ai-code-stream] Error calling streamText (attempt ${retryCount + 1}/${maxRetries + 1}):`, streamError);
+            
+            // Check if this is a Groq service unavailable error
+            const isGroqServiceError = isKimiGroq && streamError.message?.includes('Service unavailable');
+            const isRetryableError = streamError.message?.includes('Service unavailable') || 
+                                    streamError.message?.includes('rate limit') ||
+                                    streamError.message?.includes('timeout');
+            
+            if (retryCount < maxRetries && isRetryableError) {
+              retryCount++;
+              console.log(`[generate-ai-code-stream] Retrying in ${retryCount * 2} seconds...`);
+              
+              // Send progress update about retry
+              await sendProgress({ 
+                type: 'info', 
+                message: `Service temporarily unavailable, retrying (attempt ${retryCount + 1}/${maxRetries + 1})...` 
+              });
+              
+              // Wait before retry with exponential backoff
+              await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
+              
+              // If Groq fails, try switching to a fallback model
+              if (isGroqServiceError && retryCount === maxRetries) {
+                console.log('[generate-ai-code-stream] Groq service unavailable, falling back to GPT-4');
+                streamOptions.model = openai('gpt-4-turbo');
+                actualModel = 'gpt-4-turbo';
+              }
+            } else {
+              // Final error, send to user
+              await sendProgress({ 
+                type: 'error', 
+                message: `Failed to initialize ${isGoogle ? 'Gemini' : isAnthropic ? 'Claude' : isOpenAI ? 'GPT-5' : isKimiGroq ? 'Kimi (Groq)' : 'Groq'} streaming: ${streamError.message}` 
+              });
+              
+              // If this is a Google model error, provide helpful info
+              if (isGoogle) {
+                await sendProgress({ 
+                  type: 'info', 
+                  message: 'Tip: Make sure your GEMINI_API_KEY is set correctly and has proper permissions.' 
+                });
+              }
+              
+              throw streamError;
+            }
           }
-          
-          throw streamError;
         }
         
         // Stream the response and parse in real-time
@@ -1329,7 +1365,7 @@ It's better to have 3 complete files than 10 incomplete files.`
         let tagBuffer = '';
         
         // Stream the response and parse for packages in real-time
-        for await (const textPart of result.textStream) {
+        for await (const textPart of result?.textStream || []) {
           const text = textPart || '';
           generatedCode += text;
           currentFile += text;
@@ -1695,8 +1731,7 @@ Provide the complete file content without any truncation. Include all necessary 
                     },
                     { role: 'user', content: completionPrompt }
                   ],
-                  temperature: isGPT5 ? undefined : appConfig.ai.defaultTemperature,
-                  maxTokens: appConfig.ai.truncationRecoveryMaxTokens
+                  temperature: model.startsWith('openai/gpt-5') ? undefined : appConfig.ai.defaultTemperature
                 });
                 
                 // Get the full text from the stream

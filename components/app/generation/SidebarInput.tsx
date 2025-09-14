@@ -1,8 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import Globe from "@/components/app/(home)/sections/hero-input/_svg/Globe";
-import HeroInputSubmitButton from "@/components/app/(home)/sections/hero-input/Button/Button";
+import Link from "next/link";
 
 interface SidebarInputProps {
   onSubmit: (url: string, style: string, model: string, instructions?: string) => void;
@@ -16,12 +15,12 @@ export default function SidebarInput({ onSubmit, disabled = false }: SidebarInpu
   const [additionalInstructions, setAdditionalInstructions] = useState<string>("");
   const [isValidUrl, setIsValidUrl] = useState<boolean>(false);
 
-  // Simple URL validation
-  const validateUrl = (urlString: string) => {
-    if (!urlString) return false;
-    const urlPattern = /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/;
-    return urlPattern.test(urlString.toLowerCase());
-  };
+  // Simple URL validation - currently unused but keeping for future use
+  // const validateUrl = (urlString: string) => {
+  //   if (!urlString) return false;
+  //   const urlPattern = /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/;
+  //   return urlPattern.test(urlString.toLowerCase());
+  // };
 
   const styles = [
     { id: "1", name: "Glassmorphism", description: "Frosted glass effect" },
@@ -44,9 +43,9 @@ export default function SidebarInput({ onSubmit, disabled = false }: SidebarInpu
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!url.trim() || disabled) return;
-    
+
     onSubmit(url.trim(), selectedStyle, selectedModel, additionalInstructions || undefined);
-    
+
     // Reset form
     setUrl("");
     setAdditionalInstructions("");
@@ -55,31 +54,14 @@ export default function SidebarInput({ onSubmit, disabled = false }: SidebarInpu
 
   return (
     <div className="w-full">
-      <div className="bg-white rounded-20 border border-gray-200 shadow-sm">
+      <div >
         <div className="p-4 border-b border-gray-100">
-          <h3 className="text-sm font-medium text-gray-900 mb-3">Generate New Website</h3>
-          
-          {/* URL Input */}
-          <div className="flex gap-3 items-center mb-3">
-            <Globe />
-            <input
-              className="flex-1 bg-transparent text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none"
-              placeholder="example.com"
-              type="text"
-              value={url}
-              disabled={disabled}
-              onChange={(e) => {
-                setUrl(e.target.value);
-                setIsValidUrl(validateUrl(e.target.value));
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  handleSubmit();
-                }
-              }}
-            />
-          </div>
+         {/* link to home page with button */}
+         <Link href="/">
+          <button className="w-full px-3 py-2 text-xs font-medium text-gray-700 bg-white rounded border border-gray-200 focus:border-orange-500 focus:outline-none focus:ring-1 focus:ring-orange-500">
+            Generate a new website
+          </button>
+         </Link>
         </div>
 
         {/* Options Section - Show when valid URL */}
@@ -96,8 +78,8 @@ export default function SidebarInput({ onSubmit, disabled = false }: SidebarInpu
                     disabled={disabled}
                     className={`
                       py-2 px-2 rounded text-xs font-medium border transition-all text-center
-                      ${selectedStyle === style.id 
-                        ? 'border-orange-500 bg-orange-50 text-orange-900' 
+                      ${selectedStyle === style.id
+                        ? 'border-orange-500 bg-orange-50 text-orange-900'
                         : 'border-gray-200 hover:border-gray-300 bg-white text-gray-700'
                       }
                       ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
@@ -125,7 +107,7 @@ export default function SidebarInput({ onSubmit, disabled = false }: SidebarInpu
                 ))}
               </select>
             </div>
-            
+
             {/* Additional Instructions */}
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-2">Additional Instructions (optional)</label>
@@ -147,12 +129,12 @@ export default function SidebarInput({ onSubmit, disabled = false }: SidebarInpu
                 className={`
                   w-full py-2.5 px-4 rounded-lg text-sm font-medium transition-all
                   ${isValidUrl && !disabled
-                    ? 'bg-orange-500 hover:bg-orange-600 text-white' 
+                    ? 'bg-orange-500 hover:bg-orange-600 text-white'
                     : 'bg-gray-200 text-gray-400 cursor-not-allowed'
                   }
                 `}
               >
-                {disabled ? 'Generating...' : 'Generate Website'}
+                {disabled ? 'Scraping...' : 'Scrape Site'}
               </button>
             </div>
           </div>
