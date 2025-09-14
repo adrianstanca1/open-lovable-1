@@ -33,7 +33,7 @@ VERCEL_OIDC_TOKEN=auto_generated_by_vercel_env_pull
 # VERCEL_TOKEN=vercel_xxxxxxxxxxxx   # Personal access token from Vercel dashboard
 
 # Option 2: E2B Sandbox
-# E2B_API_KEY=your_e2b_api_key      # https://e2b.dev
+# E2B_API_KEY=e2b_bc242d5b133f04d63edcf40a28ac29b114cade7e      # https://e2b.dev
 ```
 
 3. **Run**
