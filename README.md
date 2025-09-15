@@ -14,7 +14,7 @@ cd open-lovable
 pnpm install  # or npm install / yarn install
 ```
 
-2. **Add `.env.local`**
+1. **Add `.env.local`**
 
 ```env
 # Required
