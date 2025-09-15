@@ -2,50 +2,79 @@
 // This file contains all configurable settings for the application
 
 export const appConfig = {
+  // Vercel Sandbox Configuration
+  vercelSandbox: {
+    // Sandbox timeout in minutes
+    timeoutMinutes: 15,
+
+    // Convert to milliseconds for Vercel Sandbox API
+    get timeoutMs() {
+      return this.timeoutMinutes * 60 * 1000;
+    },
+
+    // Development server port (Vercel Sandbox typically uses 3000 for Next.js/React)
+    devPort: 3000,
+
+    // Time to wait for dev server to be ready (in milliseconds)
+    devServerStartupDelay: 7000,
+
+    // Time to wait for CSS rebuild (in milliseconds)
+    cssRebuildDelay: 2000,
+
+    // Working directory in sandbox
+    workingDirectory: '/app',
+
+    // Default runtime for sandbox
+    runtime: 'node22' // Available: node22, python3.13, v0-next-shadcn, cua-ubuntu-xfce
+  },
+
   // E2B Sandbox Configuration
   e2b: {
     // Sandbox timeout in minutes
-    timeoutMinutes: 15,
-    
+    timeoutMinutes: 30,
+
     // Convert to milliseconds for E2B API
     get timeoutMs() {
       return this.timeoutMinutes * 60 * 1000;
     },
-    
-    // Vite development server port
+
+    // Development server port (E2B uses 5173 for Vite)
     vitePort: 5173,
-    
-    // Time to wait for Vite to be ready (in milliseconds)
-    viteStartupDelay: 7000,
-    
-    // Time to wait for CSS rebuild (in milliseconds)
-    cssRebuildDelay: 2000,
-    
-    // Default sandbox template (if using templates)
-    defaultTemplate: undefined, // or specify a template ID
+
+    // Time to wait for Vite dev server to be ready (in milliseconds)
+    viteStartupDelay: 10000,
+
+    // Working directory in sandbox
+    workingDirectory: '/home/user/app',
   },
   
   // AI Model Configuration
   ai: {
     // Default AI model
-    defaultModel: 'openai/gpt-5-nano',
+    defaultModel: 'moonshotai/kimi-k2-instruct-0905',
     
     // Available models
     availableModels: [
-      'openai/gpt-5-nano',
-      'openai/gpt-5-mini', 
       'openai/gpt-5',
-      'moonshotai/kimi-k2-instruct',
-      'anthropic/claude-3-5-sonnet-20241022'
+      'moonshotai/kimi-k2-instruct-0905',
+      'anthropic/claude-sonnet-4-20250514',
+      'google/gemini-2.0-flash-exp'
     ],
     
     // Model display names
     modelDisplayNames: {
-      'openai/gpt-5-nano': 'GPT-5 Nano',
-      'openai/gpt-5-mini': 'GPT-5 Mini',
       'openai/gpt-5': 'GPT-5',
-      'moonshotai/kimi-k2-instruct': 'Kimi K2 Instruct',
-      'anthropic/claude-3-5-sonnet-20241022': 'Claude 3.5 Sonnet'
+      'moonshotai/kimi-k2-instruct-0905': 'Kimi K2 (Groq)',
+      'anthropic/claude-sonnet-4-20250514': 'Sonnet 4',
+      'google/gemini-2.0-flash-exp': 'Gemini 2.0 Flash (Experimental)'
+    } as Record<string, string>,
+    
+    // Model API configuration
+    modelApiConfig: {
+      'moonshotai/kimi-k2-instruct-0905': {
+        provider: 'groq',
+        model: 'moonshotai/kimi-k2-instruct-0905'
+      }
     },
     
     // Temperature settings for non-reasoning models
@@ -67,7 +96,7 @@ export const appConfig = {
     packageInstallRefreshDelay: 5000,
     
     // Enable/disable automatic truncation recovery
-    enableTruncationRecovery: true,
+    enableTruncationRecovery: false, // Disabled - too many false positives
     
     // Maximum number of truncation recovery attempts per file
     maxTruncationRecoveryAttempts: 1,
